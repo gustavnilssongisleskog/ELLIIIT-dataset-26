@@ -29,6 +29,16 @@ if __name__ == "__main__":
     else:
         print(f"No rover position available for cycle {CYCLE_ID}")
 
+    microphone_positions = alf.load_microphone_positions()
+    mic_pos = microphone_positions.get(MICROPHONE_LABEL.upper())
+    if mic_pos is not None:
+        print(
+            f"Microphone {MICROPHONE_LABEL} position: "
+            f"x={mic_pos[0]:.2f}, y={mic_pos[1]:.2f}, z={mic_pos[2]:.2f}"
+        )
+    else:
+        print(f"Position not found for microphone {MICROPHONE_LABEL}")
+
     waveform, waveform_values, sample_index = alf.get_acoustic_waveform(
         EXPERIMENT_ID,
         CYCLE_ID,

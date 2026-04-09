@@ -4,6 +4,8 @@ import sys
 
 import numpy as np
 import xarray as xr
+import requests
+import yaml
 
 # Setup: Locate and import csi_plot_utils
 NOTEBOOK_DIR = Path.cwd().resolve()
@@ -131,5 +133,24 @@ def get_rover_position(
     position = csi.cycle_position(csi_ds, experiment_id, int(cycle_id))
     csi_ds.close()
     return position
+
+
+MICROPHONE_POSITIONS_URL = (
+    "https://raw.githubusercontent.com/techtile-by-dramco/"
+    "techtile-description/refs/heads/main/geometry/"
+    "techtile_microphone_locations.yml"
+)
+
+
+def load_microphone_positions(positions_url: str = MICROPHONE_POSITIONS_URL) -> dict[str, np.ndarray]:
+    response = requests.get(positions_url, timeout=20)
+    response.raise_for_status()
+    config = yaml.safe_load(response.text)
+
+    positions: dict[str, np.ndarray] = {}
+    for entry in config["microphones"]:
+        microphone = str(entry["tile"]).upper()
+        positions[microphone] = np.array([entry["x"], entry["y"], entry["z"]], dtype=float)
+    return positions
 
 
