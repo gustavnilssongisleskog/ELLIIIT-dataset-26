@@ -2,8 +2,6 @@ from pathlib import Path
 import importlib.util
 import sys
 
-from IPython.display import Markdown, display
-import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
@@ -32,7 +30,6 @@ spec.loader.exec_module(csi)
 
 RESULTS_DIR = PROJECT_ROOT / "results"
 ACOUSTIC_DOWNLOAD_SCRIPT = Path("processing") / "dataset-download" / "download_acoustic_datasets.py"
-plt.rcParams["figure.figsize"] = (12, 4.5)
 
 
 def acoustic_download_instructions(experiment_id: str) -> str:
@@ -76,126 +73,63 @@ def open_acoustic_dataset(experiment_id: str, dataset_path: str | Path | None = 
     return ds, path
 
 
-def first_available_selection(ds: xr.Dataset, experiment_id: str | None = None) -> tuple[str, int, str]:
-    if experiment_id is None:
-        if ds.sizes.get("experiment_id", 0) == 0:
-            raise ValueError("The acoustic dataset does not contain any experiments.")
-        experiment_id = str(ds["experiment_id"].values[0])
+def open_csi_dataset(experiment_id: str, dataset_path: str | Path | None = None) -> tuple[xr.Dataset, Path]:
+    if dataset_path is None:
+        patterns = ["csi*.nc"]
+        candidates: list[Path] = []
+        for pattern in patterns:
+            candidates.extend(sorted(RESULTS_DIR.glob(pattern)))
+        candidates = list(dict.fromkeys(path.resolve() for path in candidates))
+        if not candidates:
+            raise FileNotFoundError(f"Could not find CSI dataset in {RESULTS_DIR}")
+        dataset_path = candidates[0]
 
-    experiment = ds.sel(experiment_id=experiment_id)
-    waveform_grid = np.asarray(experiment["values"].values)
-    if waveform_grid.size == 0:
-        raise ValueError(f"The acoustic dataset for {experiment_id} does not contain any waveform values.")
-
-    cycle_mask = np.any(np.isfinite(waveform_grid), axis=(1, 2))
-    cycle_positions = np.flatnonzero(cycle_mask)
-    if cycle_positions.size == 0:
-        raise ValueError(f"No complete waveform cycle is available for experiment {experiment_id}.")
-
-    cycle_pos = int(cycle_positions[0])
-    cycle_id = int(experiment["cycle_id"].values[cycle_pos])
-    cycle_slice = experiment.sel(cycle_id=cycle_id)
-    mic_waveforms = np.asarray(cycle_slice["values"].values)
-    mic_mask = np.any(np.isfinite(mic_waveforms), axis=1)
-    mic_positions = np.flatnonzero(mic_mask)
-    if mic_positions.size == 0:
-        microphone_label = str(cycle_slice["microphone_label"].values[0])
-    else:
-        microphone_label = str(cycle_slice["microphone_label"].values[int(mic_positions[0])])
-
-    return str(experiment_id), int(cycle_id), microphone_label
-
-
-def acoustic_xarray_structure_markdown(ds: xr.Dataset, max_coord_preview: int = 6) -> str:
-    dimension_rows = []
-    for dimension, size in ds.sizes.items():
-        if dimension == "sample_index":
-            meaning = "Waveform sample axis inside `values`."
-        elif dimension in {"experiment_id", "cycle_id", "microphone_label"}:
-            meaning = "Named measurement axis."
-        else:
-            meaning = "No description recorded."
-        dimension_rows.append((dimension, int(size), meaning))
-
-    coordinate_rows = [
-        (
-            coordinate_name,
-            type(ds.indexes[coordinate_name]).__name__ if coordinate_name in ds.indexes else "(none)",
-            csi.preview_coord_values(ds[coordinate_name].values, max_items=max_coord_preview),
+    dataset_path = Path(dataset_path).resolve()
+    ds = csi.open_netcdf_dataset(dataset_path, label=f"CSI dataset")
+    available = ds["experiment_id"].values.astype(str).tolist()
+    if experiment_id not in available:
+        ds.close()
+        raise ValueError(
+            f"CSI dataset {dataset_path} does not contain experiment_id={experiment_id!r}. "
+            f"Available experiments: {available}"
         )
-        for coordinate_name in ds.coords
-    ]
-
-    variable_rows = []
-    for variable_name in ds.data_vars:
-        if variable_name == "values":
-            meaning = "Acoustic waveforms indexed by experiment_id, cycle_id, microphone_label, and sample_index."
-        else:
-            meaning = "No description recorded."
-        variable_rows.append(
-            (
-                variable_name,
-                ", ".join(ds[variable_name].dims),
-                tuple(int(length) for length in ds[variable_name].shape),
-                meaning,
-            )
-        )
-
-    sections = [
-        "## Dataset Axes",
-        csi.markdown_table(["Dimension", "Size", "Meaning"], dimension_rows),
-        "",
-        "## Coordinate Indexes",
-        csi.markdown_table(["Coordinate", "Index type", "Preview"], coordinate_rows),
-        "",
-        "## Data Variables",
-        csi.markdown_table(["Variable", "Dims", "Shape", "Meaning"], variable_rows),
-        "",
-        "Think of the dataset as one stack of experiment slices.",
-        "",
-        "- `experiment_id` selects the experiment.",
-        "- `cycle_id` selects one measurement cycle inside that experiment.",
-        "- `microphone_label` selects the microphone inside that cycle.",
-        "- `sample_index` is the waveform axis inside `values` and is a dimension, not a labeled coordinate.",
-    ]
-    return "\n".join(sections)
+    return ds, dataset_path
 
 
-def acoustic_selection_walkthrough_markdown(ds: xr.Dataset, experiment_id: str, cycle_id: int, microphone_label: str) -> str:
-    full_sizes = ", ".join(f"{name}={size}" for name, size in ds.sizes.items())
-    experiment_slice = ds.sel(experiment_id=experiment_id)
-    cycle_slice = experiment_slice.sel(cycle_id=int(cycle_id))
-    microphone_slice = cycle_slice.sel(microphone_label=str(microphone_label))
+def get_acoustic_dataset_shape(
+    experiment_id: str,
+    dataset_path: str | Path | None = None,
+) -> dict[str, int]:
+    ds, _ = open_acoustic_dataset(experiment_id, dataset_path)
+    shape = {name: int(size) for name, size in ds.sizes.items()}
+    ds.close()
+    return shape
 
-    rows = [
-        (
-            "`ds`",
-            full_sizes,
-            "The complete acoustic dataset.",
-        ),
-        (
-            f"`ds.sel(experiment_id=\"{experiment_id}\")`",
-            ", ".join(f"{name}={size}" for name, size in experiment_slice.sizes.items()),
-            "One experiment slice. `cycle_id` stays as the main measurement axis.",
-        ),
-        (
-            f"`...sel(cycle_id={int(cycle_id)})`",
-            ", ".join(f"{name}={size}" for name, size in cycle_slice.sizes.items()) or "(scalar)",
-            "One acoustic cycle. The waveform is now arranged only by microphone and sample index.",
-        ),
-        (
-            f"`...sel(microphone_label=\"{microphone_label}\")`",
-            ", ".join(f"{name}={size}" for name, size in microphone_slice.sizes.items()) or "(scalar)",
-            "One microphone waveform. Only `sample_index` remains.",
-        ),
-    ]
 
-    sections = [
-        "## Selection Walkthrough",
-        csi.markdown_table(["Selection", "Remaining dims", "Meaning"], rows),
-        "",
-        "Use `.sel(...)` for named coordinates such as `experiment_id`, `cycle_id`, and `microphone_label`.",
-        "Use `.isel(...)` only when you intentionally want integer positions instead of coordinate labels.",
-    ]
-    return "\n".join(sections)
+def get_acoustic_waveform(
+    experiment_id: str,
+    cycle_id: int,
+    microphone_label: str,
+    dataset_path: str | Path | None = None,
+) -> tuple[xr.DataArray, np.ndarray, np.ndarray]:
+    ds, _ = open_acoustic_dataset(experiment_id, dataset_path)
+    waveform = ds.sel(experiment_id=experiment_id, cycle_id=int(cycle_id))
+    waveform = waveform["values"].sel(microphone_label=str(microphone_label)).load()
+    ds.close()
+
+    waveform_values = np.asarray(waveform.values, dtype=float)
+    sample_index = np.arange(waveform_values.size)
+    return waveform, waveform_values, sample_index
+
+
+def get_rover_position(
+    experiment_id: str,
+    cycle_id: int,
+    csi_dataset_path: str | Path | None = None,
+) -> dict[str, object]:
+    csi_ds, _ = open_csi_dataset(experiment_id, csi_dataset_path)
+    position = csi.cycle_position(csi_ds, experiment_id, int(cycle_id))
+    csi_ds.close()
+    return position
+
 

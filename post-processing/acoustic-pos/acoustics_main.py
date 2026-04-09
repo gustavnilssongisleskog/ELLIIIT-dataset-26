@@ -1,26 +1,48 @@
 import acoustic_local_functions as alf
+import matplotlib.pyplot as plt
 
 EXPERIMENT_ID = "EXP008"
+CYCLE_ID = 20  # Set the exact acoustic cycle you want to inspect.
+MICROPHONE_LABEL = "D06"  # Set the exact microphone label for the acoustic waveform.
 DATASET_PATH = None  # Set this to a specific .nc file when you do not want the newest match.
-MAX_COORD_PREVIEW = 6
+CSI_DATASET_PATH = None  # Optional: provide a specific CSI dataset path if needed.
 
+if __name__ == "__main__":
+    ds, dataset_path = alf.open_acoustic_dataset(EXPERIMENT_ID, DATASET_PATH)
+    print(f"Loaded dataset: {dataset_path}")
+    print(f"Selected experiment: {EXPERIMENT_ID}")
 
+    shape = alf.get_acoustic_dataset_shape(EXPERIMENT_ID, DATASET_PATH)
+    print(f"Dataset shape: {shape}")
 
-ds, dataset_path = alf.open_acoustic_dataset(EXPERIMENT_ID, DATASET_PATH)
-SELECTED_EXPERIMENT_ID, SELECTED_CYCLE_ID, SELECTED_MICROPHONE_LABEL = alf.first_available_selection(ds, EXPERIMENT_ID)
+    cycle_ids = ds["cycle_id"].values.astype(int)
+    if cycle_ids.size:
+        print(f"Cycle ID range: {int(cycle_ids.min())} .. {int(cycle_ids.max())}")
+    ds.close()
 
-print(f"Loaded dataset: {dataset_path}")
-print(f"Selected experiment: {SELECTED_EXPERIMENT_ID}")
-print(f"Selected cycle: {SELECTED_CYCLE_ID}")
-print(f"Selected microphone: {SELECTED_MICROPHONE_LABEL}")
-print(
-    "Dataset shape:"
-    f" experiment_id={ds.sizes.get('experiment_id', 0)},"
-    f" cycle_id={ds.sizes.get('cycle_id', 0)},"
-    f" microphone_label={ds.sizes.get('microphone_label', 0)},"
-    f" sample_index={ds.sizes.get('sample_index', 0)}"
-)
-cycle_ids = ds["cycle_id"].values.astype(int)
-if cycle_ids.size:
-    print(f"Cycle ID range: {int(cycle_ids.min())} .. {int(cycle_ids.max())}")
+    position = alf.get_rover_position(EXPERIMENT_ID, CYCLE_ID, CSI_DATASET_PATH)
+    if position["position_available"]:
+        print(
+            f"Rover position for cycle {CYCLE_ID}: "
+            f"x={position['rover_x']:.2f}, y={position['rover_y']:.2f}, z={position['rover_z']:.2f}"
+        )
+    else:
+        print(f"No rover position available for cycle {CYCLE_ID}")
 
+    waveform, waveform_values, sample_index = alf.get_acoustic_waveform(
+        EXPERIMENT_ID,
+        CYCLE_ID,
+        MICROPHONE_LABEL,
+        DATASET_PATH,
+    )
+    print(f"Waveform dims: {dict(waveform.sizes)}")
+
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    ax.plot(sample_index, waveform_values, color="navy", linewidth=1.2)
+    ax.set_title(
+        f"Acoustic waveform for {EXPERIMENT_ID} / cycle {CYCLE_ID} / mic {MICROPHONE_LABEL}"
+    )
+    ax.set_xlabel("sample_index")
+    ax.set_ylabel("values")
+    ax.grid(True, alpha=0.25)
+    plt.show()
