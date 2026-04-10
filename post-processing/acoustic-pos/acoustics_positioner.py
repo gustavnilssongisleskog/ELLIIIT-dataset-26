@@ -8,9 +8,15 @@ DATASET_PATH = None  # Set this to a specific .nc file when you do not want the 
 CSI_DATASET_PATH = None  # Optional: provide a specific CSI dataset path if needed.
 
 if __name__ == "__main__":
+
     ds, dataset_path = alf.open_acoustic_dataset(EXPERIMENT_ID, DATASET_PATH)
     print(f"Loaded dataset: {dataset_path}")
     print(f"Selected experiment: {EXPERIMENT_ID}")
+
+    # Get all microphone labels
+    microphone_labels = ds["microphone_label"].values.astype(str).tolist()
+    print(f"All microphone labels: {microphone_labels}")
+    print(f"Number of microphones: {len(microphone_labels)}")
 
     shape = alf.get_acoustic_dataset_shape(EXPERIMENT_ID, DATASET_PATH)
     print(f"Dataset shape: {shape}")
