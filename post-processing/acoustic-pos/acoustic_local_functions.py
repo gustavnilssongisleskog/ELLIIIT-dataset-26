@@ -9,6 +9,8 @@ import yaml
 import matplotlib.pyplot as plt
 import librosa as lbr
 
+plt.rcParams['interactive']
+
 # Setup: Locate and import csi_plot_utils
 NOTEBOOK_DIR = Path.cwd().resolve()
 for candidate_dir in (
@@ -202,7 +204,7 @@ def get_selected_mic_positions(microphone_positions, MICROPHONE_LABEL):
             missing_mics.append(mic_label)
 
     if missing_mics:
-        print(f"Warning: Positions not found for microphones: {missing_mics}")
+        print(f"\nSelected {len(selected_anchors_dict)} anchors with strongest signals ({metric_name}):")
 
     print(f"Loaded positions for {len(selected_mic_positions)} microphones")
     # Loop through all selected microphones
@@ -211,6 +213,43 @@ def get_selected_mic_positions(microphone_positions, MICROPHONE_LABEL):
 
     # Example usage: selected_mic_positions['D06'] returns the [x, y, z] position array
     return selected_mic_positions
+
+def select_anchors(waveform_values: np.ndarray, microphone_label: str, experiment_id: str, cycle_id: int, n_selected_anchors: int = 1, sumrate_threshold: float = 2.8) -> dict[str, object]:
+    values = np.asarray(waveform_values, dtype=float)
+    signal_rms = float(np.sqrt(np.mean(values ** 2))) if values.size else 0.0
+    abs_values = np.abs(values)
+    signal_sumrate = float(np.sum(abs_values[abs_values > sumrate_threshold])) if values.size else 0.0
+
+    return {
+        "experiment_id": str(experiment_id),
+        "cycle_id": int(cycle_id),
+        "microphone_label": str(microphone_label),
+        "n_selected_anchors": int(n_selected_anchors),
+        "signal_rms": signal_rms,
+        "signal_sumrate": signal_sumrate,
+        "waveform_values": values,
+    }
+
+def select_top_anchors(anchor_candidates, anchor_selection_method, n_selected_anchors):
+    """Select top anchors based on the chosen method and return as dictionary."""
+    sort_key = 'signal_rms' if anchor_selection_method == 'rms' else 'signal_sumrate'
+    selected_anchors = sorted(anchor_candidates, key=lambda x: x[sort_key], reverse=True)[:n_selected_anchors]
+    selected_anchors_dict = {anchor['microphone_label']: anchor for anchor in selected_anchors}
+    return selected_anchors_dict, sort_key
+
+
+def print_selected_anchors_info(selected_anchors_dict, sort_key, anchor_selection_method):
+    """Print information about the selected anchors."""
+    metric_name = 'RMS' if anchor_selection_method == 'rms' else 'Sum Rate'
+    print(f"Selected {len(selected_anchors_dict)} anchors with strongest signals ({metric_name}):")
+    for mic_label, anchor in selected_anchors_dict.items():
+        value = anchor[sort_key]
+        rms = anchor['signal_rms']
+        sumrate = anchor['signal_sumrate']
+        waveform = anchor['waveform_values']
+        
+        print(f"  {mic_label}: {metric_name}={value:.4f} (RMS={rms:.4f}, SumRate={sumrate:.2f}, Waveform length={len(waveform)})")
+
 
 def read_transmit_chirp():
     original_chirp = "post-processing/acoustic-pos/Old_functions/chirp.wav"

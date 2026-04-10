@@ -15,6 +15,10 @@ config_path = script_dir / 'config.json'
 with open(config_path) as json_file:
     config = json.load(json_file)
 
+n_selected_ans = config['number_of_selected_anchors']
+anchor_selection_method = config['anchor_selection_method']
+sumrate_threshold = config['sumrate_threshold']
+
 if config['use_all_mics']:
     MICROPHONE_LABEL = config['all_mics']
 else:
@@ -55,6 +59,9 @@ if __name__ == "__main__":
     ds, dataset_path = alf.open_acoustic_dataset(EXPERIMENT_ID, DATASET_PATH)
     print(f"Processing {len(selected_mic_positions)} microphones...")
 
+    # Collect anchor candidates for selection
+    anchor_candidates = []
+
     # Loop over all selected microphones
     for mic_label, mic_position in selected_mic_positions.items():
         print(f"\nProcessing microphone {mic_label}...")
@@ -63,17 +70,25 @@ if __name__ == "__main__":
         waveform, waveform_values, sample_index = alf.get_acoustic_waveform(EXPERIMENT_ID, CYCLE_ID, mic_label, DATASET_PATH)
 
         # Plot the waveform
-        alf.plot_received_signal_mic(sample_index, waveform_values, EXPERIMENT_ID, CYCLE_ID, mic_label)
+        #alf.plot_received_signal_mic(sample_index, waveform_values, EXPERIMENT_ID, CYCLE_ID, mic_label)
 
-        # Do anchor selection for microphones (choose 6 from for instance 15)
+        # Collect anchor metadata for selection based on signal strength
+        anchor_info = alf.select_anchors(waveform_values, mic_label, EXPERIMENT_ID, CYCLE_ID, n_selected_ans, sumrate_threshold)
+        anchor_candidates.append(anchor_info)
 
-        # Do Pulse Compression
+    # Select the top anchors based on the chosen method
+    selected_anchors_dict, sort_key = alf.select_top_anchors(anchor_candidates, anchor_selection_method, n_selected_ans)
 
-        # Add LPF
+    # Print selected anchors information
+    alf.print_selected_anchors_info(selected_anchors_dict, sort_key, anchor_selection_method)
 
-        # Perform MB positioning
-            # Do ranging based on peak prominence
+    # Do Pulse Compression
 
-            # Do multilateriation based on LS
+    # Add LPF
 
-        # Perform GNN positioning
+    # Perform MB positioning
+        # Do ranging based on peak prominence
+
+        # Do multilateriation based on LS
+
+    # Perform GNN positioning
