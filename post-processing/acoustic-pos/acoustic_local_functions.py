@@ -1,11 +1,13 @@
 from pathlib import Path
 import importlib.util
 import sys
-
+import samplerate
 import numpy as np
 import xarray as xr
 import requests
 import yaml
+import matplotlib.pyplot as plt
+import librosa as lbr
 
 # Setup: Locate and import csi_plot_utils
 NOTEBOOK_DIR = Path.cwd().resolve()
@@ -154,3 +156,65 @@ def load_microphone_positions(positions_url: str = MICROPHONE_POSITIONS_URL) -> 
     return positions
 
 
+def resample_chirp(fs_source, fs_mic, chirp_orig):
+    """
+    Downsample original chirp signal if fs source =/= fs mic
+    :param fs_source: sample frequency at speaker
+    :param fs_mic: sample frequency at receiver
+    :param chirp_orig: original chirp signal
+    :return: chirp_orig_resampl: resampled original chirp signal
+    """
+    if fs_source != fs_mic:
+        fs_ratio = float(fs_mic) / float(fs_source)
+        new_length = int(fs_ratio * chirp_orig.shape[0])
+        re_sampled_orig_chirp_signal = np.zeros((1, new_length))
+
+        # why sinc: http://www.mega-nerd.com/SRC/api_misc.html#ErrorReporting
+        re_sampled_orig_chirp_signal = samplerate.resample(chirp_orig, fs_ratio, "sinc_best")
+        chirp_orig_resampl = re_sampled_orig_chirp_signal
+
+    else:  # in the sample rates are identical, no up/down sampling is required
+        chirp_orig_resampl = chirp_orig
+
+    return chirp_orig_resampl
+
+
+def plot_received_signal_mic(sample_index, waveform_values, EXPERIMENT_ID, CYCLE_ID, mic_label):
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    ax.plot(sample_index, waveform_values, color="navy", linewidth=1.2)
+    ax.set_title(
+        f"Acoustic waveform for {EXPERIMENT_ID} / cycle {CYCLE_ID} / mic {mic_label}"
+    )
+    ax.set_xlabel("sample_index")
+    ax.set_ylabel("values")
+    ax.grid(True, alpha=0.25)
+    plt.show()
+
+def get_selected_mic_positions(microphone_positions, MICROPHONE_LABEL):
+    selected_mic_positions = {}
+    missing_mics = []
+
+    for mic_label in MICROPHONE_LABEL:
+        mic_pos = microphone_positions.get(mic_label.upper())
+        if mic_pos is not None:
+            selected_mic_positions[mic_label] = mic_pos
+        else:
+            missing_mics.append(mic_label)
+
+    if missing_mics:
+        print(f"Warning: Positions not found for microphones: {missing_mics}")
+
+    print(f"Loaded positions for {len(selected_mic_positions)} microphones")
+    # Loop through all selected microphones
+    for mic_label, position in selected_mic_positions.items():
+        print(f"{mic_label}: {position}")
+
+    # Example usage: selected_mic_positions['D06'] returns the [x, y, z] position array
+    return selected_mic_positions
+
+def read_transmit_chirp():
+    original_chirp = "post-processing/acoustic-pos/Old_functions/chirp.wav"
+    chirp_orig, fs_source = lbr.load(original_chirp, sr=None)
+    duration_chirp = lbr.get_duration(y=chirp_orig, sr=fs_source)
+
+    return fs_source, chirp_orig, duration_chirp
