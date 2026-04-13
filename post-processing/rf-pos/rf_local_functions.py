@@ -203,21 +203,21 @@ def _discover_requested_hostnames(
 
 
 
-if __name__ == "__main__":
-    # requests = {
-    #     "EXP003": [i + 1 for i in range(529)],
-    #     "EXP005": [i + 1 for i in range(777)],
-    #     "EXP006": [i + 1 for i in range(238)],
-    #     "EXP007": [i + 1 for i in range(378)],
-    #     "EXP008": [i + 1 for i in range(201)],
-    #     "EXP010": [i + 1 for i in range(458)],
-    #     "EXP011": [i + 1 for i in range(291)],
-    #     "EXP012": [i + 1 for i in range(784)]
-    # }
-    requests = {
-        "EXP003": [1, 100, 200, 300, 400],
-        "EXP005": [1, 2, 3],
-    }
-    ds = extract_phase(requests)
+# if __name__ == "__main__":
+#     # requests = {
+#     #     "EXP003": [i + 1 for i in range(529)],
+#     #     "EXP005": [i + 1 for i in range(777)],
+#     #     "EXP006": [i + 1 for i in range(238)],
+#     #     "EXP007": [i + 1 for i in range(378)],
+#     #     "EXP008": [i + 1 for i in range(201)],
+#     #     "EXP010": [i + 1 for i in range(458)],
+#     #     "EXP011": [i + 1 for i in range(291)],
+#     #     "EXP012": [i + 1 for i in range(784)]
+#     # }
+#     requests = {
+#         "EXP003": [1, 100, 200, 300, 400],
+#         "EXP005": [1, 2, 3],
+#     }
+#     ds = extract_phase(requests)
 
-    print(ds)
+#     print(ds)
