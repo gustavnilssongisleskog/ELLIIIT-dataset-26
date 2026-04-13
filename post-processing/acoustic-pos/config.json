@@ -5,5 +5,9 @@
   "fs_mic" : 250000,
   "number_of_selected_anchors" : 4,
   "anchor_selection_method": "sumrate",
-  "sumrate_threshold": 2.8
+  "sumrate_threshold": 1.1,
+  "peak_prominence_factor": 0.19,
+  "plot_full_pulse_compression": false,
+  "temperature": 20,
+  "wake_up_duration": 0.06
 }
