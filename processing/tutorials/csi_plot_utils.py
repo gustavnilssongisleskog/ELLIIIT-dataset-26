@@ -129,7 +129,7 @@ def find_dataset_paths(
     elif experiment_id is None:
         patterns = ["csi*.nc"]
     else:
-        patterns = [f"csi_{experiment_slug(experiment_id)}*.nc"]
+        patterns = [f"csi_*{experiment_slug(experiment_id)}*.nc"]
 
     candidate_paths: list[Path] = []
     seen_paths: set[Path] = set()
@@ -167,7 +167,7 @@ def open_dataset(
             if experiment_id is None:
                 raise FileNotFoundError(f"Could not find a dataset matching csi*.nc in: {searched_locations}")
             raise FileNotFoundError(
-                f"Could not find a dataset matching csi_{experiment_slug(experiment_id)}*.nc in: "
+                f"Could not find a dataset matching csi_*{experiment_slug(experiment_id)}*.nc in: "
                 f"{searched_locations}"
             )
         dataset_path = candidates[0]
