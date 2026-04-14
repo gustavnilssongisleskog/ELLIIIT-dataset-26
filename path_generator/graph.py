@@ -12,7 +12,7 @@ def generate_graph(ds: xr.Dataset, num_neighbors: int = 5, max_radius: float = 0
         include (np.ndarray, optional): Boolean mask showing which rover positions to include. Should have length 5011... (i.e. number of measurements that are not NaN). Defaults to None.
 
     Returns:
-        tuple[list[list[tuple[float, int]]], list[tuple[int, int]]]: Graph as adjacency list with edges (weight, neighbor) and a list mapping from node to measurement.
+        tuple[list[list[tuple[float, int]]]], list[tuple[int, int]]: Graph as adjacency list with edges (weight, neighbor) and a list mapping from node to measurement.
     """
     available: np.ndarray = np.array(ds.position_available.data, dtype=bool)
     available_flat = np.reshape(available, -1)
