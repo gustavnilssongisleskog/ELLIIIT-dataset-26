@@ -7,16 +7,16 @@ CSI_DATASET_PATH = None  # Optional: provide a specific CSI dataset path if need
 
 if __name__ == "__main__":
 
-    EXPERIMENT_ID = "EXP008"
+    EXPERIMENT_ID = "EXP010"
     CYCLE_ID = 70  # Set the exact acoustic cycle you want to inspect.
     PATH_ID = 0
 
     # Load all setup values (config, microphone positions, chirp)
     setup = alf.load_experiment_setup()
     print('\nSpeed of sound: ', setup['v_sound'], ' m/s\n')
-    print("Duration of the transmitted chirp: %.2f s" % setup['duration_chirp'])
-    print("Sample rate of the source : %.2f Hz" % setup['fs_source'])
-    print("Sample rate of the microphone : %.2f Hz" % setup['fs_mic'])
+    # print("Duration of the transmitted chirp: %.2f s" % setup['duration_chirp'])
+    # print("Sample rate of the source : %.2f Hz" % setup['fs_source'])
+    # print("Sample rate of the microphone : %.2f Hz" % setup['fs_mic'])
     print(f"Processing {len(setup['selected_mic_positions'])} microphones...")
 
     # Read the GT position for that measurement
@@ -34,7 +34,7 @@ if __name__ == "__main__":
 
     # Select the top anchors based on the chosen method
     selected_anchors_dict, sort_key = alf.select_top_anchors(anchor_candidates, setup['anchor_selection_method'], setup['n_selected_ans'])
-    alf.print_selected_anchors_info(selected_anchors_dict, sort_key, setup['anchor_selection_method'])
+    # alf.print_selected_anchors_info(selected_anchors_dict, sort_key, setup['anchor_selection_method'])
 
     # Apply gain equalisation and plot adjusted waveforms
     selected_anchors_dict = alf.apply_gain_equalisation(selected_anchors_dict, setup['chirp_orig_resampl'])

@@ -3,6 +3,7 @@ import acoustic_local_functions as alf
 
 if __name__ == "__main__":
 	PATH_ID = 0
+	POSITION_INDEX = 0
 
 	pos_records_all, rng_records_all = alf.load_mb_logs()
 	pos_records, rng_records = alf.filter_records_by_path_id(pos_records_all, rng_records_all, PATH_ID)
@@ -61,5 +62,13 @@ if __name__ == "__main__":
 
 	# Plots for the selected PATH_ID
 	alf.plot_position_error_cdfs(pos_data['error_2d_m'], pos_data_3d['error_3d_m'], PATH_ID)
-	alf.plot_estimated_vs_gt_2d(pos_data['estimated_xy'], pos_data['ground_truth_xy'], PATH_ID)
+	alf.plot_estimated_vs_gt_2d(pos_data['estimated_xy'], pos_data['ground_truth_xy'], PATH_ID, room_size_xy=(8.56, 4.0))
+
+	# Plot one chosen 3D sample with used and not-used microphones
+	if pos_records:
+		selected_pos_record, selected_rng_record = alf.get_position_and_ranging_record_by_index(pos_records, rng_records, POSITION_INDEX)
+		mic_positions = alf.load_microphone_positions()
+		alf.plot_selected_position_3d_with_mics(selected_pos_record, selected_rng_record, mic_positions, room_dims_xyz=(8.56, 4.0, 2.4))
+	else:
+		print("No filtered position records available for 3D selected-position plot.")
 

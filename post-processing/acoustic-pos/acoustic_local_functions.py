@@ -226,8 +226,8 @@ def get_selected_mic_positions(microphone_positions, MICROPHONE_LABEL):
 
     print(f"Loaded positions for {len(selected_mic_positions)} microphones")
     # Loop through all selected microphones
-    for mic_label, position in selected_mic_positions.items():
-        print(f"{mic_label}: {position}")
+    # for mic_label, position in selected_mic_positions.items():
+    #     # print(f"{mic_label}: {position}")
 
     # Example usage: selected_mic_positions['D06'] returns the [x, y, z] position array
     return selected_mic_positions
@@ -1110,13 +1110,19 @@ def plot_position_error_cdfs(error_2d_m: np.ndarray, error_3d_m: np.ndarray, pat
     plt.show()
 
 
-def plot_estimated_vs_gt_2d(estimated_xy: np.ndarray, ground_truth_xy: np.ndarray, path_id: int | str) -> None:
-    """Plot estimated and ground-truth 2D trajectories for one PATH_ID."""
+def plot_estimated_vs_gt_2d(estimated_xy: np.ndarray, ground_truth_xy: np.ndarray, path_id: int | str, room_size_xy: tuple[float, float] = (8.56, 4.0)) -> None:
+    """Plot estimated and ground-truth 2D trajectories for one PATH_ID, with room boundary."""
     if estimated_xy.size == 0:
         print(f"No 2D position samples available for PATH_ID {path_id}.")
         return
 
     fig, ax = plt.subplots(figsize=(7, 7))
+
+    room_x, room_y = room_size_xy
+    room_outline_x = [0.0, room_x, room_x, 0.0, 0.0]
+    room_outline_y = [0.0, 0.0, room_y, room_y, 0.0]
+    ax.plot(room_outline_x, room_outline_y, "k-", linewidth=2.0, label="Room boundary")
+
     ax.plot(estimated_xy[:, 0], estimated_xy[:, 1], "o-", linewidth=1.5, markersize=4, label="Estimated path")
 
     # Plot GT only where available (non-NaN rows)
@@ -1129,7 +1135,184 @@ def plot_estimated_vs_gt_2d(estimated_xy: np.ndarray, ground_truth_xy: np.ndarra
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.axis("equal")
+    ax.set_xlim(-0.2, room_x + 0.2)
+    ax.set_ylim(-0.2, room_y + 0.2)
     ax.grid(True, alpha=0.3)
     ax.legend()
     plt.tight_layout()
     plt.show()
+
+
+def get_position_and_ranging_record_by_index(position_records: list[dict], ranging_records: list[dict], index: int) -> tuple[dict, dict | None]:
+    """Return one position record and its matching ranging record using experiment/path/cycle identity."""
+    if index < 0 or index >= len(position_records):
+        raise IndexError(f"index {index} is out of range for {len(position_records)} position records")
+
+    pos_rec = position_records[index]
+    exp = pos_rec.get("experiment_id")
+    cyc = pos_rec.get("cycle_id")
+    pid = pos_rec.get("path_id")
+
+    for rng_rec in ranging_records:
+        if (
+            str(rng_rec.get("experiment_id")) == str(exp)
+            and str(rng_rec.get("cycle_id")) == str(cyc)
+            and str(rng_rec.get("path_id")) == str(pid)
+        ):
+            return pos_rec, rng_rec
+
+    return pos_rec, None
+
+
+def _add_room_wireframe(fig: go.Figure, room_dims_xyz: tuple[float, float, float]) -> None:
+    """Add a simple rectangular-room wireframe to a Plotly 3D figure."""
+    x_max, y_max, z_max = room_dims_xyz
+    corners = np.array(
+        [
+            [0, 0, 0],
+            [x_max, 0, 0],
+            [x_max, y_max, 0],
+            [0, y_max, 0],
+            [0, 0, z_max],
+            [x_max, 0, z_max],
+            [x_max, y_max, z_max],
+            [0, y_max, z_max],
+        ],
+        dtype=float,
+    )
+    edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+
+    for i0, i1 in edges:
+        fig.add_trace(
+            go.Scatter3d(
+                x=[corners[i0, 0], corners[i1, 0]],
+                y=[corners[i0, 1], corners[i1, 1]],
+                z=[corners[i0, 2], corners[i1, 2]],
+                mode="lines",
+                line=dict(color="rgba(80,80,80,0.6)", width=3),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
+
+def plot_selected_position_3d_with_mics(position_record: dict, ranging_record: dict | None, microphone_positions: dict[str, np.ndarray], room_dims_xyz: tuple[float, float, float] = (8.56, 4.0, 2.4)) -> go.Figure:
+    """Plot selected 3D estimate/GT plus used and not-used microphones in Plotly."""
+    fig = go.Figure()
+    _add_room_wireframe(fig, room_dims_xyz)
+
+    used_labels: list[str] = []
+    if ranging_record is not None:
+        used_labels = [str(x.get("microphone_label")) for x in ranging_record.get("per_anchor", []) if x.get("microphone_label") is not None]
+    used_set = {lbl.upper() for lbl in used_labels}
+
+    configured_labels = [str(lbl).upper() for lbl in config.get("all_mics", [])]
+    all_labels = [lbl for lbl in configured_labels if lbl in microphone_positions]
+    used_xyz = []
+    used_names = []
+    not_used_xyz = []
+    not_used_names = []
+    for lbl in all_labels:
+        pos = np.asarray(microphone_positions[lbl], dtype=float)
+        if lbl.upper() in used_set:
+            used_xyz.append(pos)
+            used_names.append(lbl)
+        else:
+            not_used_xyz.append(pos)
+            not_used_names.append(lbl)
+
+    if not_used_xyz:
+        not_used_xyz = np.vstack(not_used_xyz)
+        fig.add_trace(
+            go.Scatter3d(
+                x=not_used_xyz[:, 0],
+                y=not_used_xyz[:, 1],
+                z=not_used_xyz[:, 2],
+                mode="markers",
+                name="Not used microphones",
+                marker=dict(size=4, color="#B94E48", symbol="square"),
+                text=[f"Mic {n}" for n in not_used_names],
+            )
+        )
+
+    if used_xyz:
+        used_xyz = np.vstack(used_xyz)
+        fig.add_trace(
+            go.Scatter3d(
+                x=used_xyz[:, 0],
+                y=used_xyz[:, 1],
+                z=used_xyz[:, 2],
+                mode="markers",
+                name="Used microphones",
+                marker=dict(size=5, color="#28965A", symbol="circle"),
+                text=[f"Mic {n}" for n in used_names],
+            )
+        )
+
+    est = position_record.get("estimated_position_xyz")
+    if est is not None:
+        est = np.asarray(est, dtype=float)
+        fig.add_trace(
+            go.Scatter3d(
+                x=[est[0]], y=[est[1]], z=[est[2]],
+                mode="markers",
+                name="Estimated position",
+                marker=dict(size=8, color="#1F77B4", symbol="diamond"),
+            )
+        )
+
+    gt = position_record.get("ground_truth_position_xyz")
+    if gt is not None:
+        gt = np.asarray(gt, dtype=float)
+        fig.add_trace(
+            go.Scatter3d(
+                x=[gt[0]], y=[gt[1]], z=[gt[2]],
+                mode="markers",
+                name="Ground-truth position",
+                marker=dict(size=8, color="#F39C12", symbol="x"),
+            )
+        )
+
+    path_id = position_record.get("path_id", "NA")
+    cycle_id = position_record.get("cycle_id", "NA")
+    exp_id = position_record.get("experiment_id", "NA")
+
+    camera_params = dict(
+        up=dict(x=0, y=0, z=1),
+        center=dict(x=0, y=0, z=0),
+        eye=dict(x=-1.6, y=-2.2, z=1.4),
+    )
+
+    fig.update_scenes(
+        xaxis=dict(title_text="x [m]", range=[-0.2, room_dims_xyz[0] + 0.2]),
+        yaxis=dict(title_text="y [m]", range=[-0.2, room_dims_xyz[1] + 0.2]),
+        zaxis=dict(title_text="z [m]", range=[-0.2, room_dims_xyz[2] + 0.2]),
+        aspectmode="data",
+    )
+    fig.update_layout(
+        title=f"3D Positioning View - {exp_id} path {path_id} cycle {cycle_id}",
+        scene_camera=camera_params,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=0.98,
+            xanchor="left",
+            x=0.02,
+            bgcolor="rgba(255,255,255,0.75)",
+            bordercolor="rgba(0,0,0,0.25)",
+            borderwidth=1,
+        ),
+        width=1200,
+        height=800,
+    )
+
+    figs_dir = Path(__file__).parent / "Figs/position_examples"
+    figs_dir.mkdir(parents=True, exist_ok=True)
+    output_file = figs_dir / f"path_{path_id}_Cycle_{cycle_id}_EXP_{exp_id}.html"
+    fig.write_html(str(output_file))
+    return fig
