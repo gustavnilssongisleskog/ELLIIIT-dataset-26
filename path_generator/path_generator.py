@@ -79,9 +79,10 @@ def format_walks(walks: list[list[tuple[int, int, bool]]], ds: xr.Dataset):
         ds (xr.Dataset): Dataset
 
     Returns:
-        list[list[dict]]: Instead of tuples, uses dicts for the information. Also includes the rover position as one numpy ndarray. 
+        list[list[dict]]: Instead of tuples, uses dicts for the information. Also includes the rover position as one numpy ndarray.
     """
     walks_formatted = []
+    experiment_names = ds["experiment_id"].values
     for walk in walks:
         walk_info = []
         for exp, cycle, rest in walk:
@@ -89,9 +90,9 @@ def format_walks(walks: list[list[tuple[int, int, bool]]], ds: xr.Dataset):
                 ds.data_vars["rover_y"].data[exp, cycle],
                 ds.data_vars["rover_z"].data[exp, cycle]])
             walk_info.append({
-                "experiment_id": exp,
-                "cycle_id": cycle,
-                "position": point,
+                "experiment_id": experiment_names[exp],
+                "cycle_id": cycle + 1,
+                "rover_position": point,
                 "resting": rest
             })
         walks_formatted.append(walk_info)
