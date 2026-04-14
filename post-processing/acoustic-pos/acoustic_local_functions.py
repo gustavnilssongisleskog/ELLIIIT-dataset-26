@@ -14,6 +14,7 @@ import plotly.colors
 import plotly.io as pio
 from tqdm import tqdm
 import json
+from scipy.optimize import curve_fit, least_squares
 
 pio.renderers.default = "browser"
 
@@ -221,7 +222,7 @@ def get_selected_mic_positions(microphone_positions, MICROPHONE_LABEL):
             missing_mics.append(mic_label)
 
     if missing_mics:
-        print(f"\nSelected {len(selected_anchors_dict)} anchors with strongest signals ({metric_name}):")
+        print(f"Missing microphone labels (ignored): {missing_mics}")
 
     print(f"Loaded positions for {len(selected_mic_positions)} microphones")
     # Loop through all selected microphones
@@ -598,3 +599,537 @@ def plot_pulsecomp_and_lpf(
     fig.write_html(str(figs_dir / "pulse_compression_lpf_plot.html"))
 
     #fig.show()
+
+
+def load_experiment_setup() -> dict:
+    """Load all experiment setup values from config, microphone positions, and chirp file."""
+    n_selected_ans = config['number_of_selected_anchors']
+    anchor_selection_method = config['anchor_selection_method']
+    sumrate_threshold = config['sumrate_threshold']
+    v_sound = 20 * np.sqrt(273 + config["temperature"])
+    fs_mic = config['fs_mic']
+    plot_full_pulse_compression = config['plot_full_pulse_compression']
+
+    if config['use_all_mics']:
+        mic_labels = config['all_mics']
+    else:
+        mic_labels = config['used_mics']
+
+    microphone_positions = load_microphone_positions()
+    selected_mic_positions = get_selected_mic_positions(microphone_positions, mic_labels)
+
+    fs_source, chirp_orig, duration_chirp = read_transmit_chirp()
+    chirp_orig_resampl = resample_chirp(fs_source, fs_mic, chirp_orig) * 10
+
+    return {
+        'n_selected_ans': n_selected_ans,
+        'anchor_selection_method': anchor_selection_method,
+        'sumrate_threshold': sumrate_threshold,
+        'v_sound': v_sound,
+        'fs_mic': fs_mic,
+        'fs_source': fs_source,
+        'duration_chirp': duration_chirp,
+        'selected_mic_positions': selected_mic_positions,
+        'chirp_orig_resampl': chirp_orig_resampl,
+        'plot_full_pulse_compression': plot_full_pulse_compression,
+    }
+
+
+def collect_anchor_candidates(selected_mic_positions: dict, experiment_id: str, cycle_id: int, dataset_path, chirp_orig_resampl: np.ndarray, fs_mic: float, n_selected_ans: int, sumrate_threshold: float) -> list:
+    """Loop over all selected microphones and collect anchor candidates."""
+    anchor_candidates = []
+    for mic_label in tqdm(selected_mic_positions, total=len(selected_mic_positions), desc="Processing microphones", unit="mic"):
+        _waveform, waveform_values, _sample_index = get_acoustic_waveform(experiment_id, cycle_id, mic_label, dataset_path)
+        waveform_filtered = butter_highpass_filter(waveform_values, 15000, fs_mic, 10)
+        anchor_info = select_anchors(waveform_filtered, mic_label, experiment_id, cycle_id, n_selected_ans, sumrate_threshold)
+        anchor_candidates.append(anchor_info)
+    return anchor_candidates
+
+
+def apply_gain_equalisation(selected_anchors_dict: dict, chirp_orig_resampl: np.ndarray, wmin: int = 8000, wmax: int = 10000) -> dict:
+    """Apply gain equalisation to all selected anchors and store adjusted waveforms in-place."""
+    signals = np.array([anchor['waveform_values'] for anchor in selected_anchors_dict.values()])
+    adjusted_signals = gain_equaliser(chirp_orig_resampl, signals, wmin, wmax)
+    for i, mic_label in enumerate(selected_anchors_dict.keys()):
+        selected_anchors_dict[mic_label]['adjusted_waveform'] = adjusted_signals[i]
+    return selected_anchors_dict
+
+
+def compute_true_distances(position: dict, selected_anchors_dict: dict, selected_mic_positions: dict) -> dict | None:
+    """Compute ground-truth distances from rover position to each selected microphone."""
+    if not position["position_available"]:
+        return None
+    rover_xyz = np.array([position['rover_x'], position['rover_y'], position['rover_z']], dtype=float)
+    true_distances = {}
+    for mic_label in selected_anchors_dict.keys():
+        mic_xyz = np.asarray(selected_mic_positions[mic_label], dtype=float)
+        true_distances[mic_label] = float(np.linalg.norm(mic_xyz - rover_xyz))
+    return true_distances
+
+
+def compute_ranging(corr_index_array: np.ndarray, chirp_orig_resampl: np.ndarray, fs_mic: float, v_sound: float) -> np.ndarray:
+    """Convert correlation peak indices to measured distances (m)."""
+    n_wake_up_samples = config["wake_up_duration"] * fs_mic
+    n_wake_up_samples_eff = int(min(n_wake_up_samples, np.size(chirp_orig_resampl)))
+    wake_up_at_sample = int(np.size(chirp_orig_resampl) - n_wake_up_samples_eff)
+    eff_start_samp_chirp = (((corr_index_array + 1) - n_wake_up_samples_eff)[np.newaxis]).T
+    delta_sample = wake_up_at_sample - eff_start_samp_chirp
+    distances_meas = (delta_sample / fs_mic) * v_sound
+    return distances_meas
+
+
+def print_ranging_errors(distances_meas: np.ndarray, true_distances: dict | None, selected_anchors_dict: dict) -> None:
+    """Print measured distances and, if available, ranging errors against ground truth."""
+    print("Measured distances (m):", distances_meas)
+    if true_distances is None:
+        return
+    print("Theoretical distances (m):")
+    ranging_errors = []
+    for idx, mic_label in enumerate(selected_anchors_dict.keys()):
+        meas_val = float(distances_meas[idx, 0])
+        gt_val = float(true_distances[mic_label])
+        error_val = meas_val - gt_val
+        ranging_errors.append(abs(error_val))
+        print(f"  {mic_label}: measured={meas_val:.3f}, theoretical={gt_val:.3f}, error={error_val:+.3f}")
+    mean_ranging_error = float(np.mean(ranging_errors))
+    p95_ranging_error = float(np.percentile(ranging_errors, 95))
+    print(f"Mean absolute ranging error (m): {mean_ranging_error:.3f}")
+    print(f"P95 absolute ranging error (m): {p95_ranging_error:.3f}")
+
+
+
+def LS_positioning(anchor_positions, distances, x0, selected_mic_positions=None):
+    """
+    Least Squares positioning estimate. Minimise the difference in measured distance to anchor point and estimated distances to do positioning
+    :param anchor_positions: e.g. np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0.5, 0.5, 0.5]])
+    :param distances: e.g. np.array([1.5, 1.3, 1.2, 1.4, 0.7])
+    :param x0: Initial guess for the position of the point e.g. np.array([0.5, 0.5, 0.5])
+    :param selected_mic_positions: optional dict with microphone xyz positions keyed by label
+    :return: the estimated position
+    """
+    if isinstance(anchor_positions, dict):
+        first_value = next(iter(anchor_positions.values()), None)
+        if first_value is None:
+            raise ValueError("anchor_positions is empty")
+
+        # If dict already maps mic label -> [x, y, z], use it directly.
+        if np.asarray(first_value).shape == (3,):
+            anchor_positions = np.asarray(list(anchor_positions.values()), dtype=float)
+        else:
+            # If dict is selected_anchors_dict, map labels using selected_mic_positions.
+            if selected_mic_positions is None:
+                raise ValueError(
+                    "selected_mic_positions must be provided when anchor_positions is selected_anchors_dict"
+                )
+            anchor_labels = list(anchor_positions.keys())
+            anchor_positions = np.asarray([selected_mic_positions[label] for label in anchor_labels], dtype=float)
+    else:
+        anchor_positions = np.asarray(anchor_positions, dtype=float)
+
+    distances = np.asarray(distances, dtype=float).reshape(-1)
+    x0 = np.asarray(x0, dtype=float).reshape(-1)
+
+    if anchor_positions.ndim != 2 or anchor_positions.shape[1] != 3:
+        raise ValueError("anchor_positions must have shape (N, 3)")
+    if distances.size != anchor_positions.shape[0]:
+        raise ValueError(
+            f"Mismatch between distances ({distances.size}) and anchors ({anchor_positions.shape[0]})"
+        )
+
+    # Define the function to minimize
+    def minimise_function_LS(x, anchor_positions, distances):
+        # Calculate the squared differences between the estimated distances and the actual distances
+        return np.sqrt(np.sum((np.linalg.norm(anchor_positions - x, axis=1) - distances) ** 2))
+    # Call the least squares optimizer
+    res = least_squares(minimise_function_LS, x0, args=(anchor_positions, distances))
+    return res.x
+
+
+def append_dict_record(file_path: Path, record: dict) -> int:
+    """Append one dictionary record to a .npy file that stores a list of dictionaries."""
+    if file_path.exists():
+        existing = np.load(file_path, allow_pickle=True).tolist()
+        if isinstance(existing, dict):
+            existing = [existing]
+        elif not isinstance(existing, list):
+            existing = list(existing)
+    else:
+        existing = []
+
+    existing.append(record)
+    np.save(file_path, np.array(existing, dtype=object))
+    return len(existing)
+
+
+def compute_position_error_metrics(position: dict, position_estimate: np.ndarray) -> dict:
+    """Compute 3D/2D position error metrics from GT position and LS estimate."""
+    estimated_position_xyz = np.asarray(position_estimate, dtype=float).reshape(-1)
+    estimated_position_xy = estimated_position_xyz[:2]
+
+    metrics = {
+        "position_available": bool(position["position_available"]),
+        "true_position_xyz": None,
+        "true_position_xy": None,
+        "estimated_position_xyz": estimated_position_xyz,
+        "estimated_position_xy": estimated_position_xy,
+        "estimation_error_vector_xyz": None,
+        "position_error_m": float(np.nan),
+        "position_error_2d_m": float(np.nan),
+    }
+
+    if metrics["position_available"]:
+        true_position_xyz = np.array([position['rover_x'], position['rover_y'], position['rover_z']], dtype=float)
+        true_position_xy = true_position_xyz[:2]
+        estimation_error_vector = estimated_position_xyz - true_position_xyz
+        metrics.update(
+            {
+                "true_position_xyz": true_position_xyz,
+                "true_position_xy": true_position_xy,
+                "estimation_error_vector_xyz": estimation_error_vector,
+                "position_error_m": float(np.linalg.norm(estimation_error_vector)),
+                "position_error_2d_m": float(np.linalg.norm(estimated_position_xy - true_position_xy)),
+            }
+        )
+
+    return metrics
+
+
+def print_position_error_report(metrics: dict) -> None:
+    """Print a compact position error report."""
+    if metrics["position_available"]:
+        print(
+            "Position error report:\n"
+            f"  True position      : {metrics['true_position_xyz']}\n"
+            f"  Estimated position : {metrics['estimated_position_xyz']}\n"
+            f"  Error vector (m)   : {metrics['estimation_error_vector_xyz']}\n"
+            f"  Euclidean error (3D, m): {metrics['position_error_m']:.4f}\n"
+            f"  Euclidean error (2D, m): {metrics['position_error_2d_m']:.4f}"
+        )
+    else:
+        print("Position error report: GT position unavailable, saving NaN error values.")
+
+
+def build_position_record(experiment_id: str, cycle_id: int, path_id: int | str, metrics: dict) -> dict:
+    """Create a serializable position record dictionary."""
+    return {
+        "experiment_id": str(experiment_id),
+        "cycle_id": int(cycle_id),
+        "path_id": int(path_id) if str(path_id).isdigit() else str(path_id),
+        "position_available": bool(metrics["position_available"]),
+        "ground_truth_position_xyz": None if metrics["true_position_xyz"] is None else metrics["true_position_xyz"].tolist(),
+        "ground_truth_position_xy": None if metrics["true_position_xy"] is None else metrics["true_position_xy"].tolist(),
+        "estimated_position_xyz": metrics["estimated_position_xyz"].tolist(),
+        "estimated_position_xy": metrics["estimated_position_xy"].tolist(),
+        "position_error_m": float(metrics["position_error_m"]),
+        "position_error_2d_m": float(metrics["position_error_2d_m"]),
+    }
+
+
+def build_ranging_record(experiment_id: str, cycle_id: int, path_id: int | str, metrics: dict, distances_meas: np.ndarray, true_distances: dict | None, selected_anchors_dict: dict) -> dict:
+    """Create a serializable ranging record dictionary with per-anchor details."""
+    measured_distances = np.asarray(distances_meas, dtype=float).reshape(-1)
+    anchor_labels = list(selected_anchors_dict.keys())
+
+    per_anchor_ranging = []
+    abs_errors = []
+    for idx, mic_label in enumerate(anchor_labels):
+        measured_m = float(measured_distances[idx])
+        theoretical_m = None
+        error_m = None
+        abs_error_m = None
+
+        if true_distances is not None and mic_label in true_distances:
+            theoretical_m = float(true_distances[mic_label])
+            error_m = measured_m - theoretical_m
+            abs_error_m = abs(error_m)
+            abs_errors.append(abs_error_m)
+
+        per_anchor_ranging.append(
+            {
+                "microphone_label": mic_label,
+                "measured_distance_m": measured_m,
+                "theoretical_distance_m": theoretical_m,
+                "error_m": error_m,
+                "abs_error_m": abs_error_m,
+            }
+        )
+
+    if abs_errors:
+        mean_abs_ranging_error = float(np.mean(abs_errors))
+        p95_abs_ranging_error = float(np.percentile(abs_errors, 95))
+    else:
+        mean_abs_ranging_error = float(np.nan)
+        p95_abs_ranging_error = float(np.nan)
+
+    return {
+        "experiment_id": str(experiment_id),
+        "cycle_id": int(cycle_id),
+        "path_id": int(path_id) if str(path_id).isdigit() else str(path_id),
+        "position_available": bool(metrics["position_available"]),
+        "ground_truth_position_xyz": None if metrics["true_position_xyz"] is None else metrics["true_position_xyz"].tolist(),
+        "estimated_position_xyz": metrics["estimated_position_xyz"].tolist(),
+        "mean_abs_ranging_error_m": mean_abs_ranging_error,
+        "p95_abs_ranging_error_m": p95_abs_ranging_error,
+        "per_anchor": per_anchor_ranging,
+    }
+
+
+def save_position_and_ranging_records(output_dir: Path, position_record: dict, ranging_record: dict) -> tuple[Path, int, Path, int]:
+    """Append position and ranging records to their generic .npy files."""
+    position_error_file = output_dir / "MB_position_errors.npy"
+    ranging_error_file = output_dir / "MB_ranging_errors.npy"
+
+    position_records_count = append_dict_record(position_error_file, position_record)
+    ranging_records_count = append_dict_record(ranging_error_file, ranging_record)
+
+    return position_error_file, position_records_count, ranging_error_file, ranging_records_count
+
+
+def _load_dict_list_from_npy(file_path: Path) -> list[dict]:
+	"""Load a .npy file that stores either one dict or a list of dict records."""
+	if not file_path.exists():
+		raise FileNotFoundError(f"File not found: {file_path}")
+
+	raw = np.load(file_path, allow_pickle=True).tolist()
+	if isinstance(raw, dict):
+		return [raw]
+	if isinstance(raw, list):
+		return raw
+	return list(raw)
+
+
+def load_mb_logs(base_dir: str | Path | None = None) -> tuple[list[dict], list[dict]]:
+	"""
+	Load MB position and ranging records.
+
+	Returns:
+		position_records: list of dictionaries from MB_position_errors.npy
+		ranging_records: list of dictionaries from MB_ranging_errors.npy
+	"""
+	if base_dir is None:
+		base_dir = Path(__file__).parent
+	else:
+		base_dir = Path(base_dir)
+
+	position_file = base_dir / "MB_position_errors.npy"
+	ranging_file = base_dir / "MB_ranging_errors.npy"
+
+	position_records = _load_dict_list_from_npy(position_file)
+	ranging_records = _load_dict_list_from_npy(ranging_file)
+	return position_records, ranging_records
+
+
+def prepare_2d_position_data(position_records: list[dict], only_with_gt: bool = True) -> dict[str, np.ndarray]:
+    """
+    Convert MB position records into numpy arrays convenient for plotting/CDF.
+
+    Returns keys:
+        estimated_xy: (N, 2)
+        ground_truth_xy: (N, 2)
+        error_2d_m: (N,)
+        path_id: (N,)
+        experiment_cycle: (N,) string labels EXPxxx_pathX_cycley
+    """
+    estimated_xy = []
+    ground_truth_xy = []
+    error_2d_m = []
+    path_id = []
+    experiment_cycle = []
+
+    for rec in position_records:
+        gt_xy = rec.get("ground_truth_position_xy")
+        est_xy = rec.get("estimated_position_xy")
+        err_2d = rec.get("position_error_2d_m")
+        pos_avail = bool(rec.get("position_available", False))
+
+        if est_xy is None:
+            continue
+        if only_with_gt and (not pos_avail or gt_xy is None or err_2d is None or np.isnan(err_2d)):
+            continue
+
+        estimated_xy.append(np.asarray(est_xy, dtype=float))
+        if gt_xy is None:
+            ground_truth_xy.append(np.array([np.nan, np.nan], dtype=float))
+        else:
+            ground_truth_xy.append(np.asarray(gt_xy, dtype=float))
+
+        error_2d_m.append(float(err_2d) if err_2d is not None else np.nan)
+        path_val = rec.get("path_id", "NA")
+        path_id.append(path_val)
+        experiment_cycle.append(f"{rec.get('experiment_id', 'NA')}_path{path_val}_cycle{rec.get('cycle_id', 'NA')}")
+
+    if not estimated_xy:
+        return {
+            "estimated_xy": np.empty((0, 2), dtype=float),
+            "ground_truth_xy": np.empty((0, 2), dtype=float),
+            "error_2d_m": np.empty((0,), dtype=float),
+            "path_id": np.empty((0,), dtype=object),
+            "experiment_cycle": np.empty((0,), dtype=object),
+        }
+
+    return {
+        "estimated_xy": np.vstack(estimated_xy),
+        "ground_truth_xy": np.vstack(ground_truth_xy),
+        "error_2d_m": np.asarray(error_2d_m, dtype=float),
+        "path_id": np.asarray(path_id, dtype=object),
+        "experiment_cycle": np.asarray(experiment_cycle, dtype=object),
+    }
+
+
+def prepare_ranging_error_data(ranging_records: list[dict]) -> dict[str, np.ndarray]:
+    """Flatten ranging records into arrays for plotting/global statistics."""
+    mean_abs = []
+    p95_abs = []
+    per_anchor_abs = []
+    path_id = []
+    experiment_cycle = []
+
+    for rec in ranging_records:
+        mean_abs.append(float(rec.get("mean_abs_ranging_error_m", np.nan)))
+        p95_abs.append(float(rec.get("p95_abs_ranging_error_m", np.nan)))
+        path_val = rec.get("path_id", "NA")
+        path_id.append(path_val)
+        experiment_cycle.append(f"{rec.get('experiment_id', 'NA')}_path{path_val}_cycle{rec.get('cycle_id', 'NA')}")
+
+        for anchor in rec.get("per_anchor", []):
+            abs_err = anchor.get("abs_error_m")
+            per_anchor_abs.append(np.nan if abs_err is None else float(abs_err))
+
+    return {
+        "mean_abs_ranging_error_m": np.asarray(mean_abs, dtype=float),
+        "p95_abs_ranging_error_m": np.asarray(p95_abs, dtype=float),
+        "per_anchor_abs_error_m": np.asarray(per_anchor_abs, dtype=float),
+        "path_id": np.asarray(path_id, dtype=object),
+        "experiment_cycle": np.asarray(experiment_cycle, dtype=object),
+    }
+
+
+def empirical_cdf(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Compute empirical CDF arrays (x_sorted, cdf_y) from a 1D array."""
+    x = np.asarray(values, dtype=float).reshape(-1)
+    x = x[~np.isnan(x)]
+    if x.size == 0:
+        return np.empty((0,), dtype=float), np.empty((0,), dtype=float)
+
+    x_sorted = np.sort(x)
+    cdf_y = np.arange(1, x_sorted.size + 1, dtype=float) / float(x_sorted.size)
+    return x_sorted, cdf_y
+
+
+def _path_id_matches(record_path_id, selected_path_id) -> bool:
+    """Return True when record path_id matches the selected PATH_ID (robust int/str compare)."""
+    return str(record_path_id) == str(selected_path_id)
+
+
+def filter_records_by_path_id(
+    position_records: list[dict],
+    ranging_records: list[dict],
+    path_id: int | str,
+) -> tuple[list[dict], list[dict]]:
+    """Filter position and ranging record lists to a single PATH_ID."""
+    pos_filtered = [rec for rec in position_records if _path_id_matches(rec.get("path_id", "NA"), path_id)]
+    rng_filtered = [rec for rec in ranging_records if _path_id_matches(rec.get("path_id", "NA"), path_id)]
+    return pos_filtered, rng_filtered
+
+
+def prepare_3d_position_data(position_records: list[dict], only_with_gt: bool = True) -> dict[str, np.ndarray]:
+    """
+    Convert MB position records into numpy arrays for 3D error/CDF analysis.
+
+    Returns keys:
+        estimated_xyz: (N, 3)
+        ground_truth_xyz: (N, 3)
+        error_3d_m: (N,)
+        path_id: (N,)
+        experiment_cycle: (N,)
+    """
+    estimated_xyz = []
+    ground_truth_xyz = []
+    error_3d_m = []
+    path_id = []
+    experiment_cycle = []
+
+    for rec in position_records:
+        gt_xyz = rec.get("ground_truth_position_xyz")
+        est_xyz = rec.get("estimated_position_xyz")
+        err_3d = rec.get("position_error_m")
+        pos_avail = bool(rec.get("position_available", False))
+
+        if est_xyz is None:
+            continue
+        if only_with_gt and (not pos_avail or gt_xyz is None or err_3d is None or np.isnan(err_3d)):
+            continue
+
+        estimated_xyz.append(np.asarray(est_xyz, dtype=float))
+        if gt_xyz is None:
+            ground_truth_xyz.append(np.array([np.nan, np.nan, np.nan], dtype=float))
+        else:
+            ground_truth_xyz.append(np.asarray(gt_xyz, dtype=float))
+
+        error_3d_m.append(float(err_3d) if err_3d is not None else np.nan)
+        path_val = rec.get("path_id", "NA")
+        path_id.append(path_val)
+        experiment_cycle.append(f"{rec.get('experiment_id', 'NA')}_path{path_val}_cycle{rec.get('cycle_id', 'NA')}")
+
+    if not estimated_xyz:
+        return {
+            "estimated_xyz": np.empty((0, 3), dtype=float),
+            "ground_truth_xyz": np.empty((0, 3), dtype=float),
+            "error_3d_m": np.empty((0,), dtype=float),
+            "path_id": np.empty((0,), dtype=object),
+            "experiment_cycle": np.empty((0,), dtype=object),
+        }
+
+    return {
+        "estimated_xyz": np.vstack(estimated_xyz),
+        "ground_truth_xyz": np.vstack(ground_truth_xyz),
+        "error_3d_m": np.asarray(error_3d_m, dtype=float),
+        "path_id": np.asarray(path_id, dtype=object),
+        "experiment_cycle": np.asarray(experiment_cycle, dtype=object),
+    }
+
+
+def plot_position_error_cdfs(error_2d_m: np.ndarray, error_3d_m: np.ndarray, path_id: int | str) -> None:
+    """Plot CDF curves for 2D and 3D positioning errors for one PATH_ID."""
+    x2, y2 = empirical_cdf(error_2d_m)
+    x3, y3 = empirical_cdf(error_3d_m)
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    if x2.size:
+        ax.plot(x2, y2, linewidth=2, label="2D Position Error CDF")
+    if x3.size:
+        ax.plot(x3, y3, linewidth=2, linestyle="--", label="3D Position Error CDF")
+
+    ax.set_title(f"Position Error CDFs - PATH_ID {path_id}")
+    ax.set_xlabel("Error (m)")
+    ax.set_ylabel("Empirical CDF")
+    ax.grid(True, alpha=0.3)
+    if x2.size or x3.size:
+        ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_estimated_vs_gt_2d(estimated_xy: np.ndarray, ground_truth_xy: np.ndarray, path_id: int | str) -> None:
+    """Plot estimated and ground-truth 2D trajectories for one PATH_ID."""
+    if estimated_xy.size == 0:
+        print(f"No 2D position samples available for PATH_ID {path_id}.")
+        return
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.plot(estimated_xy[:, 0], estimated_xy[:, 1], "o-", linewidth=1.5, markersize=4, label="Estimated path")
+
+    # Plot GT only where available (non-NaN rows)
+    valid_gt = ~np.isnan(ground_truth_xy).any(axis=1)
+    if np.any(valid_gt):
+        gt_xy = ground_truth_xy[valid_gt]
+        ax.plot(gt_xy[:, 0], gt_xy[:, 1], "s-", linewidth=1.5, markersize=4, label="Ground-truth path")
+
+    ax.set_title(f"Estimated vs GT 2D Path - PATH_ID {path_id}")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.axis("equal")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
