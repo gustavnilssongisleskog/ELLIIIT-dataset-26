@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.constants as const
 import xarray as xr
 
 # IMPORT CSI UTILS MODULE
@@ -27,62 +28,6 @@ if spec is None or spec.loader is None:
 csi = importlib.util.module_from_spec(spec)
 sys.modules["csi_plot_utils"] = csi
 spec.loader.exec_module(csi)
-
-
-
-def extract_csi_snapshots(
-    ds: xr.Dataset,
-    experiment_id: str,
-    cycle_ids: list[int] | tuple[int] | np.ndarray,
-    antenna_positions: dict[str, np.ndarray] | None = None,
-) -> xr.Dataset:
-    cycle_ids = np.asarray(cycle_ids, dtype=int)
-    if cycle_ids.size == 0:
-        raise ValueError("cycle_ids must not be empty")
-
-    experiment = ds.sel(experiment_id=experiment_id)
-    selected = experiment.sel(cycle_id=cycle_ids)
-    csi_available = selected["csi_available"].values > 0
-    if not np.any(csi_available):
-        raise ValueError(
-            f"No CSI data available for experiment {experiment_id}, cycles {cycle_ids.tolist()}."
-        )
-
-    present_hostnames = selected["hostname"].values[np.any(csi_available, axis=0)].astype(str)
-    hostnames = csi.ordered_hostnames(present_hostnames, antenna_positions)
-    selected = selected.sel(hostname=hostnames)
-
-    csi_real = selected["csi_real"].values.astype(float)
-    csi_imag = selected["csi_imag"].values.astype(float)
-    csi_complex = csi_real + 1j * csi_imag
-    amplitude = np.abs(csi_complex)
-    power_db = csi.power_to_db(np.square(amplitude))
-    phase_deg = np.rad2deg(np.angle(csi_complex))
-
-    ds_out = xr.Dataset(
-        data_vars={
-            "csi_real": (("cycle_id", "hostname"), csi_real),
-            "csi_imag": (("cycle_id", "hostname"), csi_imag),
-            "csi_amplitude": (("cycle_id", "hostname"), amplitude),
-            "csi_power_db": (("cycle_id", "hostname"), power_db),
-            "csi_phase_deg": (("cycle_id", "hostname"), phase_deg),
-        },
-        coords={
-            "cycle_id": selected["cycle_id"].values.astype(int),
-            "hostname": np.asarray(hostnames, dtype=str),
-        },
-        attrs={"experiment_id": experiment_id},
-    )
-
-    ds_out["csi_host_count"] = (
-        ("cycle_id"),
-        np.sum(csi_available, axis=1).astype(int),
-    )
-    for coord_name in ("rover_x", "rover_y", "rover_z", "position_available"):
-        if coord_name in selected:
-            ds_out[coord_name] = ("cycle_id", selected[coord_name].values)
-
-    return ds_out
 
 
 def extract_phase(requests: dict[str, list[int]]) -> xr.Dataset:
@@ -112,14 +57,13 @@ def extract_phase(requests: dict[str, list[int]]) -> xr.Dataset:
     for experiment_id, cycle_ids in cycles_by_experiment.items():
         ds, _ = csi.open_dataset(experiment_id=experiment_id, dataset_path=None)
         try:
-            print(f"Processing experiment: {experiment_id}")
             experiment = ds.sel(experiment_id=experiment_id)
             selected = experiment.sel(cycle_id=cycle_ids).reindex(cycle_id=cycle_ids, hostname=hostnames)
 
             csi_real = selected["csi_real"].values.astype(float)
             csi_imag = selected["csi_imag"].values.astype(float)
             csi_complex = csi_real + 1j * csi_imag
-            phase_slice = np.rad2deg(np.angle(csi_complex)) #TODO: VILL MAN VERKLIGEN HA I GRADER?
+            phase_slice = np.angle(csi_complex)
 
             n_cycles = len(cycle_ids)
             phase[observation_start : observation_start + n_cycles, :] = phase_slice
@@ -155,7 +99,7 @@ def extract_phase(requests: dict[str, list[int]]) -> xr.Dataset:
     # CREATE RESTRUCTURED DATASET
     phase_dataset = xr.Dataset(
         data_vars={
-            "csi_phase_deg": (("observation", "antenna"), phase),
+            "csi_phase_rad": (("observation", "antenna"), phase),
             "rover_x": (("observation",), rover_x),
             "rover_y": (("observation",), rover_y),
             "rover_z": (("observation",), rover_z),
@@ -187,7 +131,6 @@ def _discover_requested_hostnames(
     for experiment_id, requested_cycle_ids in cycles_by_experiment.items():
         ds, _ = csi.open_dataset(experiment_id=experiment_id, dataset_path=None)
         try:
-            print(f"Discovering hostnames for experiment: {experiment_id}")
             experiment = ds.sel(experiment_id=experiment_id)
             selected = experiment.sel(cycle_id=sorted(set(requested_cycle_ids)))
             csi_available = selected["csi_available"].values > 0
@@ -202,22 +145,349 @@ def _discover_requested_hostnames(
     return hostnames
 
 
+def phase_to_distance(
+    phase_rad: np.ndarray,
+    frequency_hz: float,
+    speed_of_light: float = const.speed_of_light,
+) -> np.ndarray:
+    """Convert a wrapped phase in radians to a range distance within one wavelength."""
+    wavelength = float(speed_of_light) / float(frequency_hz)
+    normalized_phase = np.mod(phase_rad, 2 * np.pi)
+    return normalized_phase / (2 * np.pi) * wavelength
 
-# if __name__ == "__main__":
-#     # requests = {
-#     #     "EXP003": [i + 1 for i in range(529)],
-#     #     "EXP005": [i + 1 for i in range(777)],
-#     #     "EXP006": [i + 1 for i in range(238)],
-#     #     "EXP007": [i + 1 for i in range(378)],
-#     #     "EXP008": [i + 1 for i in range(201)],
-#     #     "EXP010": [i + 1 for i in range(458)],
-#     #     "EXP011": [i + 1 for i in range(291)],
-#     #     "EXP012": [i + 1 for i in range(784)]
-#     # }
-#     requests = {
-#         "EXP003": [1, 100, 200, 300, 400],
-#         "EXP005": [1, 2, 3],
-#     }
-#     ds = extract_phase(requests)
 
-#     print(ds)
+def project_distances_to_plane(
+    distances: np.ndarray,
+    height_offset: float | np.ndarray = 0.0, # 0,75m höjden på rover, och antenner sitter 2,4m
+) -> np.ndarray:
+    """Project 3D distances onto the antenna plane given a vertical height offset."""
+    distances = np.asarray(distances, dtype=float)
+    height_offset = np.asarray(height_offset, dtype=float)
+    projected = np.sqrt(np.maximum(distances**2 - height_offset[..., np.newaxis] ** 2, 0.0))
+    return projected
+
+
+def _multilateration_2d_single(
+    antenna_xy: np.ndarray,
+    distances: np.ndarray,
+    weights: np.ndarray | None = None,
+) -> np.ndarray:
+    antenna_xy = np.asarray(antenna_xy, dtype=float)
+    distances = np.asarray(distances, dtype=float)
+    if antenna_xy.ndim != 2 or antenna_xy.shape[1] != 2:
+        raise ValueError("antenna_xy must have shape (n_antennas, 2)")
+    if distances.ndim != 1 or distances.shape[0] != antenna_xy.shape[0]:
+        raise ValueError("distances must have length n_antennas")
+    if antenna_xy.shape[0] < 3:
+        raise ValueError("At least three antennas are required for 2D multilateration")
+
+    reference = antenna_xy[0] # Phase difference of arrival, with first antenna being the reference
+    A = 2.0 * (antenna_xy[1:] - reference)
+    b = (
+        distances[1:] ** 2
+        - distances[0] ** 2
+        - np.sum(antenna_xy[1:] ** 2, axis=1)
+        + np.sum(reference**2)
+    )
+
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        if weights.ndim != 1 or weights.shape[0] != antenna_xy.shape[0]:
+            raise ValueError("weights must have length n_antennas")
+        w = weights[1:]
+        w = np.where(np.isnan(w), 0.0, w)
+        AtWA = (A.T * w) @ A
+        AtWb = (A.T * w) @ b
+    else:
+        AtWA = A.T @ A
+        AtWb = A.T @ b
+
+    try:
+        position = np.linalg.solve(AtWA, AtWb)
+    except np.linalg.LinAlgError:
+        position, *_ = np.linalg.lstsq(AtWA, AtWb, rcond=None)
+        position = position[:2]
+    return position
+
+
+def _distance_candidates_from_phase_rad(
+    phase_rad: np.ndarray,
+    frequency_hz: float,
+    max_distance: float,
+) -> list[np.ndarray]:
+    wavelength = float(const.speed_of_light) / float(frequency_hz)
+    d_mod = phase_to_distance(phase_rad, frequency_hz)
+    candidate_sets: list[np.ndarray] = []
+    for d0 in d_mod:
+        max_k = int(np.floor((max_distance - d0) / wavelength))
+        candidate_sets.append(d0 + np.arange(max_k + 1, dtype=float) * wavelength)
+    print(candidate_sets)
+    return candidate_sets
+
+
+def _choose_candidate_distances(
+    antenna_xy: np.ndarray,
+    candidate_sets: list[np.ndarray],
+    reference_index: int = 0,
+) -> list[np.ndarray]:
+    reference_candidates = candidate_sets[reference_index]
+    antenna_deltas = np.linalg.norm(antenna_xy - antenna_xy[reference_index], axis=1)
+    chosen_sets: list[np.ndarray] = []
+    for k0 in reference_candidates:
+        chosen = np.empty(len(candidate_sets), dtype=float)
+        chosen[reference_index] = k0
+        for i, candidates in enumerate(candidate_sets):
+            if i == reference_index:
+                continue
+            target = k0
+            sep = antenna_deltas[i]
+            bounds = (target - sep - 0.5 * (candidate_sets[i][1] - candidate_sets[i][0]),
+                      target + sep + 0.5 * (candidate_sets[i][1] - candidate_sets[i][0]))
+            if candidates.size == 0:
+                chosen[i] = np.nan
+                continue
+            in_range = candidates[(candidates >= bounds[0]) & (candidates <= bounds[1])]
+            if in_range.size > 0:
+                chosen[i] = in_range[np.argmin(np.abs(in_range - target))]
+            else:
+                chosen[i] = candidates[np.argmin(np.abs(candidates - target))]
+        chosen_sets.append(chosen)
+    return chosen_sets
+
+
+def _score_position(
+    position: np.ndarray,
+    antenna_xy: np.ndarray,
+    distances: np.ndarray,
+    weights: np.ndarray | None = None,
+    prior_position: np.ndarray | None = None,
+    prior_weight: float | None = None,
+) -> float:
+    residuals = np.linalg.norm(position - antenna_xy, axis=1) - distances
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        residuals = residuals * weights
+    score = np.nansum(residuals**2)
+    if prior_position is not None and prior_weight is not None:
+        score += float(prior_weight) * np.sum((position - prior_position) ** 2)
+    return score
+
+
+def estimate_positions_2d_from_phase(
+    ds: xr.Dataset,
+    frequency_hz: float,
+    phase_var: str = "csi_phase_rad",
+    amplitude_var: str | None = None,
+    height_offset: float | np.ndarray | None = None,
+    max_distance: float = 8.4,
+    prior_position: np.ndarray | None = None,
+    prior_weight: float | None = None,
+) -> xr.Dataset:
+    """Estimate a fused 2D position for each observation from antenna phase."""
+    if "antenna_x" not in ds or "antenna_y" not in ds:
+        raise ValueError("Dataset must include antenna_x and antenna_y coordinates for 2D positioning")
+
+    antenna_xy = np.stack(
+        [ds["antenna_x"].values, ds["antenna_y"].values], axis=-1
+    )
+    phase_rad = ds[phase_var].values.astype(float)
+
+    weights = None
+    if amplitude_var is not None and amplitude_var in ds:
+        weights = ds[amplitude_var].values.astype(float)
+
+    positions = np.full((phase_rad.shape[0], 2), np.nan, dtype=float)
+    for observation_index, observation_phase in enumerate(phase_rad):
+        observation_weights = weights[observation_index] if weights is not None else None
+        candidate_results = _candidate_positions_and_scores(
+            antenna_xy,
+            observation_phase,
+            frequency_hz,
+            max_distance,
+            height_offset=height_offset,
+            weights=observation_weights,
+            prior_position=prior_position,
+            prior_weight=prior_weight,
+        )
+        if candidate_results:
+            positions[observation_index, :] = min(candidate_results, key=lambda item: item[1])[0]
+
+    ds_out = xr.Dataset(
+        data_vars={
+            "position_x": (("observation",), positions[:, 0]),
+            "position_y": (("observation",), positions[:, 1]),
+        },
+        coords={
+            "observation": ds["observation"].values,
+            "antenna": ds["antenna"].values,
+            "source_experiment_id": ds["source_experiment_id"].values,
+            "source_cycle_id": ds["source_cycle_id"].values,
+        },
+    )
+    return ds_out
+
+
+def _candidate_positions_and_scores(
+    antenna_xy: np.ndarray,
+    phase_rad: np.ndarray,
+    frequency_hz: float,
+    max_distance: float,
+    height_offset: float | np.ndarray | None = None,
+    weights: np.ndarray | None = None,
+    prior_position: np.ndarray | None = None,
+    prior_weight: float | None = None,
+) -> list[tuple[np.ndarray, float]]:
+    candidate_sets = _distance_candidates_from_phase_rad(phase_rad, frequency_hz, max_distance)
+    candidate_results: list[tuple[np.ndarray, float]] = []
+    for chosen_distances in _choose_candidate_distances(antenna_xy, candidate_sets):
+        if height_offset is not None:
+            chosen_distances = project_distances_to_plane(chosen_distances, height_offset)
+
+        try:
+            position = _multilateration_2d_single(
+                antenna_xy,
+                chosen_distances,
+                weights,
+            )
+        except ValueError:
+            continue
+
+        score = _score_position(
+            position,
+            antenna_xy,
+            chosen_distances,
+            weights=weights,
+            prior_position=prior_position,
+            prior_weight=prior_weight,
+        )
+        candidate_results.append((position, score))
+
+    return candidate_results
+
+
+def _make_likelihoods(scores: np.ndarray) -> np.ndarray:
+    scores = np.asarray(scores, dtype=float)
+    if scores.size == 0:
+        return np.array([], dtype=float)
+    shifted = scores - np.nanmin(scores)
+    scale = np.nanmean(shifted[shifted > 0])
+    if scale == 0 or np.isnan(scale):
+        return np.where(np.isnan(shifted), 0.0, 1.0)
+    likelihoods = np.exp(-shifted / scale)
+    return likelihoods / np.nanmax(likelihoods)
+
+
+def plot_position_candidates(
+    ds: xr.Dataset,
+    observation_index: int,
+    frequency_hz: float,
+    phase_var: str = "csi_phase_rad",
+    amplitude_var: str | None = None,
+    height_offset: float | np.ndarray | None = None,
+    max_distance: float = 8.4,
+    prior_position: np.ndarray | None = None,
+    prior_weight: float | None = None,
+    annotate_top: int = 5,
+    figsize: tuple[int, int] = (8, 8),
+):
+    if "antenna_x" not in ds or "antenna_y" not in ds:
+        raise ValueError("Dataset must include antenna_x and antenna_y coordinates for plotting")
+    if observation_index < 0 or observation_index >= ds.sizes["observation"]:
+        raise IndexError("observation_index is out of range")
+
+    antenna_xy = np.stack([ds["antenna_x"].values, ds["antenna_y"].values], axis=-1)
+    phase_rad = ds[phase_var].values.astype(float)[observation_index]
+    weights = None
+    if amplitude_var is not None and amplitude_var in ds:
+        weights = ds[amplitude_var].values.astype(float)[observation_index]
+
+    true_position = None
+    if "rover_x" in ds and "rover_y" in ds:
+        true_x = float(ds["rover_x"].values[observation_index])
+        true_y = float(ds["rover_y"].values[observation_index])
+        if not (np.isnan(true_x) or np.isnan(true_y)):
+            true_position = np.array([true_x, true_y], dtype=float)
+
+    candidates = _candidate_positions_and_scores(
+        antenna_xy,
+        phase_rad,
+        frequency_hz,
+        max_distance,
+        height_offset=height_offset,
+        weights=weights,
+        prior_position=prior_position,
+        prior_weight=prior_weight,
+    )
+    if not candidates:
+        raise RuntimeError("No candidate positions found for this observation")
+
+    positions = np.asarray([pos for pos, _ in candidates], dtype=float)
+    scores = np.asarray([score for _, score in candidates], dtype=float)
+    likelihoods = _make_likelihoods(scores)
+    best_index = np.nanargmin(scores)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    scatter = ax.scatter(
+        positions[:, 0],
+        positions[:, 1],
+        c=likelihoods,
+        cmap="plasma",
+        s=60,
+        edgecolor="k",
+        alpha=0.8,
+        label="candidates",
+    )
+    ax.scatter(
+        antenna_xy[:, 0],
+        antenna_xy[:, 1],
+        marker="^",
+        c="black",
+        s=100,
+        label="antennas",
+    )
+    ax.scatter(
+        positions[best_index, 0],
+        positions[best_index, 1],
+        marker="*",
+        c="red",
+        s=180,
+        label="best",
+    )
+    if prior_position is not None:
+        ax.scatter(
+            prior_position[0],
+            prior_position[1],
+            marker="x",
+            c="green",
+            s=150,
+            label="prior",
+        )
+
+    if true_position is not None:
+        ax.scatter(
+            true_position[0],
+            true_position[1],
+            marker="D",
+            c="cyan",
+            s=130,
+            edgecolor="black",
+            label="true",
+        )
+
+    for label_index in np.argsort(scores)[:annotate_top]:
+        ax.annotate(
+            f"{likelihoods[label_index]:.2f}",
+            (positions[label_index, 0], positions[label_index, 1]),
+            textcoords="offset points",
+            xytext=(6, 6),
+            fontsize=8,
+        )
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(f"Observation {observation_index} candidate positions")
+    ax.legend(loc="best")
+    plt.colorbar(scatter, ax=ax, label="relative likelihood")
+    ax.axis("equal")
+    return fig, ax
+
