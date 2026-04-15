@@ -1,28 +1,28 @@
+import sys
+from pathlib import Path
 import acoustic_local_functions as alf
 import numpy as np
-from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parents[1]
+
+for path in (SCRIPT_DIR, PROJECT_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 DATASET_PATH = None      # Set to a specific .nc file to override the newest match.
 CSI_DATASET_PATH = None  # Optional: provide a specific CSI dataset path if needed.
+WALKS_PICKLE_PATH = PROJECT_ROOT / "walks" / "train.pickle"
+PATH_IDS_TO_PROCESS = [0]  # Replace with the path indices you want to process.
+
 
 if __name__ == "__main__":
 
-    # Provide explicit (experiment_id, cycle_id) pairs to process in sequence.
-    runs_to_process = [
-        ("EXP008", 1),
-        ("EXP008", 2),
-        ("EXP008", 133),
-        ("EXP008", 134),
-        ("EXP008", 135),
-    ]
-    PATH_ID = 0
+    runs_to_process = alf.load_runs_to_process(PATH_IDS_TO_PROCESS, walks_pickle_path=WALKS_PICKLE_PATH, csi_dataset_path=CSI_DATASET_PATH)
 
     # Load all setup values (config, microphone positions, chirp)
     setup = alf.load_experiment_setup()
     print('\nSpeed of sound: ', setup['v_sound'], ' m/s\n')
-    # print("Duration of the transmitted chirp: %.2f s" % setup['duration_chirp'])
-    # print("Sample rate of the source : %.2f Hz" % setup['fs_source'])
-    # print("Sample rate of the microphone : %.2f Hz" % setup['fs_mic'])
     print(f"Processing {len(setup['selected_mic_positions'])} microphones...")
     workers_msg = setup.get('mic_processing_workers')
     if workers_msg is None:
@@ -30,9 +30,12 @@ if __name__ == "__main__":
     else:
         print(f"Microphone processing workers: {workers_msg}")
 
-    for run_idx, (EXPERIMENT_ID, CYCLE_ID) in enumerate(runs_to_process, start=1):
+    for run_idx, (PATH_ID, EXPERIMENT_ID, CYCLE_ID) in enumerate(runs_to_process, start=1):
         print("\n" + "=" * 80)
-        print(f"Run {run_idx}/{len(runs_to_process)} | Experiment: {EXPERIMENT_ID} | Cycle: {CYCLE_ID}")
+        print(
+            f"Run {run_idx}/{len(runs_to_process)} | "
+            f"Path: {PATH_ID} | Experiment: {EXPERIMENT_ID} | Cycle: {CYCLE_ID}"
+        )
         print("=" * 80)
 
         # Read the GT position for this measurement
@@ -105,15 +108,7 @@ if __name__ == "__main__":
         alf.print_position_error_report(position_metrics)
 
         position_record = alf.build_position_record(EXPERIMENT_ID, CYCLE_ID, PATH_ID, position_metrics)
-        ranging_record = alf.build_ranging_record(
-            EXPERIMENT_ID,
-            CYCLE_ID,
-            PATH_ID,
-            position_metrics,
-            distances_meas,
-            true_distances,
-            selected_anchors_dict
-        )
+        ranging_record = alf.build_ranging_record(EXPERIMENT_ID, CYCLE_ID, PATH_ID, position_metrics, distances_meas, true_distances, selected_anchors_dict)
 
         position_error_file, position_records_count, ranging_error_file, ranging_records_count = alf.save_position_and_ranging_records(
             Path(__file__).parent,
@@ -124,4 +119,4 @@ if __name__ == "__main__":
         print(f"Saved ranging record to {ranging_error_file} (total entries: {ranging_records_count})")
 
     # Perform GNN positioning
-
+    #TODO later train on train.Pickle 'resting' flagged values, test on test.pickle 'resting' flagged values, and compare to with MB method on ceveral test set paths

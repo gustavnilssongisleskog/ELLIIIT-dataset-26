@@ -17,6 +17,7 @@ import plotly.io as pio
 from tqdm import tqdm
 import json
 from scipy.optimize import curve_fit, least_squares
+from path_generator.pickler import load_pickle
 
 pio.renderers.default = "browser"
 
@@ -723,7 +724,7 @@ def print_ranging_errors(distances_meas: np.ndarray, true_distances: dict | None
         gt_val = float(true_distances[mic_label])
         error_val = meas_val - gt_val
         ranging_errors.append(abs(error_val))
-        print(f"  {mic_label}: measured={meas_val:.3f}, theoretical={gt_val:.3f}, error={error_val:+.3f}")
+        # print(f"  {mic_label}: measured={meas_val:.3f}, theoretical={gt_val:.3f}, error={error_val:+.3f}")
     mean_ranging_error = float(np.mean(ranging_errors))
     p95_ranging_error = float(np.percentile(ranging_errors, 95))
     print(f"Mean absolute ranging error (m): {mean_ranging_error:.3f}")
@@ -1367,3 +1368,40 @@ def plot_selected_position_3d_with_mics(position_record: dict, ranging_record: d
     output_file = figs_dir / f"path_{path_id}_Cycle_{cycle_id}_EXP_{exp_id}.html"
     fig.write_html(str(output_file))
     return fig
+
+
+def load_runs_to_process(
+    path_ids_to_process: list[int],
+    walks_pickle_path: str | Path | None = None,
+    csi_dataset_path: str | Path | None = None,
+) -> list[tuple[int, str, int]]:
+    if not path_ids_to_process:
+        raise ValueError("PATH_IDS_TO_PROCESS is empty. Provide at least one path index.")
+
+    walks_pickle_path = Path(walks_pickle_path or (PROJECT_ROOT / "walks" / "train.pickle")).resolve()
+    csi_ds, resolved_csi_dataset_path = open_csi_dataset("EXP008", csi_dataset_path)
+    try:
+        walks = load_pickle(str(walks_pickle_path), csi_ds)
+    finally:
+        csi_ds.close()
+
+    invalid_path_ids = [path_id for path_id in path_ids_to_process if path_id < 0 or path_id >= len(walks)]
+    if invalid_path_ids:
+        raise IndexError(
+            f"Requested path indices {invalid_path_ids} are out of range for {len(walks)} walks in {walks_pickle_path}"
+        )
+
+    runs_to_process: list[tuple[int, str, int]] = []
+    for path_id in path_ids_to_process:
+        walk = walks[path_id]
+        static_stops = [
+            (path_id, str(stop["experiment_id"]), int(stop["cycle_id"]))
+            for stop in walk
+            if bool(stop.get("resting", False))
+        ]
+        print(f"Path {path_id}: selected {len(static_stops)} resting positions")
+        runs_to_process.extend(static_stops)
+
+    print(f"Loaded walks from {walks_pickle_path}")
+    print(f"CSI dataset used for walk formatting: {resolved_csi_dataset_path}")
+    return runs_to_process
