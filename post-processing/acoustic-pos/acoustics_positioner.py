@@ -12,8 +12,11 @@ for path in (SCRIPT_DIR, PROJECT_ROOT):
 
 DATASET_PATH = None      # Set to a specific .nc file to override the newest match.
 CSI_DATASET_PATH = None  # Optional: provide a specific CSI dataset path if needed.
-WALKS_PICKLE_PATH = PROJECT_ROOT / "walks" / "train.pickle"
-PATH_IDS_TO_PROCESS = [0]  # Replace with the path indices you want to process.
+WALKS_PICKLE_PATH = PROJECT_ROOT / "walks" / "test.pickle"
+
+# Auto-detect all available path IDs from the pickle file
+PATH_IDS_TO_PROCESS = alf.get_all_path_ids(WALKS_PICKLE_PATH)
+# Or manually override: PATH_IDS_TO_PROCESS = [0, 1, 2]  # specific paths
 
 
 if __name__ == "__main__":
@@ -117,6 +120,9 @@ if __name__ == "__main__":
         )
         print(f"Saved position record to {position_error_file} (total entries: {position_records_count})")
         print(f"Saved ranging record to {ranging_error_file} (total entries: {ranging_records_count})")
+
+    # ===== Compute calibration offset from all measurements =====
+    alf.compute_calibration_offset(SCRIPT_DIR)
 
     # Perform GNN positioning
     #TODO later train on train.Pickle 'resting' flagged values, test on test.pickle 'resting' flagged values, and compare to with MB method on ceveral test set paths

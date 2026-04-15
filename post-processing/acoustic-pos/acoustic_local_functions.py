@@ -1370,11 +1370,7 @@ def plot_selected_position_3d_with_mics(position_record: dict, ranging_record: d
     return fig
 
 
-def load_runs_to_process(
-    path_ids_to_process: list[int],
-    walks_pickle_path: str | Path | None = None,
-    csi_dataset_path: str | Path | None = None,
-) -> list[tuple[int, str, int]]:
+def load_runs_to_process(path_ids_to_process: list[int], walks_pickle_path: str | Path | None = None, csi_dataset_path: str | Path | None = None) -> list[tuple[int, str, int]]:
     if not path_ids_to_process:
         raise ValueError("PATH_IDS_TO_PROCESS is empty. Provide at least one path index.")
 
@@ -1405,3 +1401,108 @@ def load_runs_to_process(
     print(f"Loaded walks from {walks_pickle_path}")
     print(f"CSI dataset used for walk formatting: {resolved_csi_dataset_path}")
     return runs_to_process
+
+
+def get_all_path_ids(walks_pickle_path: str | Path) -> list[int]:
+    """
+    Extract all available path IDs from the walks pickle file.
+    
+    Args:
+        walks_pickle_path: Path to the pickle file (required).
+        
+    Returns:
+        List of all valid path indices (0 to num_walks - 1).
+    """
+    import pickle
+    
+    walks_pickle_path = Path(walks_pickle_path).resolve()
+    
+    if not walks_pickle_path.exists():
+        raise FileNotFoundError(f"Walks pickle file not found: {walks_pickle_path}")
+    
+    with open(walks_pickle_path, 'rb') as f:
+        walks = pickle.load(f)
+    
+    num_walks = len(walks)
+    print(f"Total walks available in {walks_pickle_path.name}: {num_walks}")
+    return list(range(num_walks))
+
+
+def compute_calibration_offset(output_dir: Path) -> dict:
+    """
+    Compute mean calibration offset from all saved position records.
+    
+    Loads all position records from disk, computes the mean estimation error vector
+    (systematic shift), and saves calibration parameters to a file for later use.
+    
+    Args:
+        output_dir: Directory where position records are stored.
+        
+    Returns:
+        Dictionary with calibration info including mean_shift_xyz, std_shift_xyz, and count.
+    """
+    pos_records_all, _ = load_mb_logs(output_dir)
+    
+    calibration_result = {
+        "mean_shift_xyz": None,
+        "std_shift_xyz": None,
+        "count": 0,
+        "calibration_file": None,
+    }
+    
+    if not pos_records_all:
+        print("No position records found for calibration computation.")
+        return calibration_result
+    
+    # Extract estimation_error_vector_xyz from all records where position is available
+    errors_xyz = [
+        np.asarray(rec.get("estimation_error_vector_xyz"), dtype=float)
+        for rec in pos_records_all
+        if rec.get("position_available") and rec.get("estimation_error_vector_xyz") is not None
+    ]
+    
+    if not errors_xyz:
+        print("No valid position measurements with error vectors found.")
+        return calibration_result
+    
+    errors_xyz = np.array(errors_xyz)
+    mean_shift_xyz = np.mean(errors_xyz, axis=0)
+    std_shift_xyz = np.std(errors_xyz, axis=0)
+    
+    calibration_result["mean_shift_xyz"] = mean_shift_xyz
+    calibration_result["std_shift_xyz"] = std_shift_xyz
+    calibration_result["count"] = len(errors_xyz)
+    
+    print("\n" + "=" * 80)
+    print("CALIBRATION SUMMARY")
+    print("=" * 80)
+    print(f"Total measurements: {len(errors_xyz)}")
+    print(f"Mean shift (m): x={mean_shift_xyz[0]:.4f}, y={mean_shift_xyz[1]:.4f}, z={mean_shift_xyz[2]:.4f}")
+    print(f"Std dev  (m): x={std_shift_xyz[0]:.4f}, y={std_shift_xyz[1]:.4f}, z={std_shift_xyz[2]:.4f}")
+    print("\nTo calibrate: subtract these values from estimated position")
+    print("  calibrated_position = estimated_position - mean_shift")
+    print("=" * 80)
+    
+    # Save calibration to file
+    calibration_file = output_dir / "calibration_offset.txt"
+    with open(calibration_file, 'w') as f:
+        f.write("Calibration Offset for System (in meters)\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"x_offset: {mean_shift_xyz[0]:.6f}\n")
+        f.write(f"y_offset: {mean_shift_xyz[1]:.6f}\n")
+        f.write(f"z_offset: {mean_shift_xyz[2]:.6f}\n")
+        f.write(f"\nStandard deviations (measurement uncertainty):\n")
+        f.write(f"x_std: {std_shift_xyz[0]:.6f}\n")
+        f.write(f"y_std: {std_shift_xyz[1]:.6f}\n")
+        f.write(f"z_std: {std_shift_xyz[2]:.6f}\n")
+        f.write(f"\nNumber of measurements: {len(errors_xyz)}\n")
+        f.write("=" * 60 + "\n")
+        f.write("Usage: When applying position estimates, subtract the offset:\n")
+        f.write("  calibrated_x = estimated_x - x_offset\n")
+        f.write("  calibrated_y = estimated_y - y_offset\n")
+        f.write("  calibrated_z = estimated_z - z_offset\n")
+    
+    calibration_result["calibration_file"] = calibration_file
+    print(f"Calibration saved to: {calibration_file}")
+    
+    return calibration_result
