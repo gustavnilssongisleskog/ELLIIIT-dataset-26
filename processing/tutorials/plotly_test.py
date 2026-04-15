@@ -78,6 +78,7 @@ last = np.argmax(np.arange(x.shape[0]) * ~np.isnan(x))
 x = x[:last + 1]
 y = y[:last + 1]
 z = z[:last + 1]
+z = np.zeros_like(z, dtype=float)
 
 
 import plotly.graph_objects as go
@@ -85,23 +86,37 @@ import numpy as np
 
 
 # Create index labels
-indices = np.arange(len(x))
+indices = np.arange(1, len(x) + 1)
 
-# Create the 3D scatter plot
-fig = go.Figure(data=[go.Scatter3d(
+# Create the 3D scatter plot with a connected path.
+fig = go.Figure()
+fig.add_trace(go.Scatter3d(
+    x=x,
+    y=y,
+    z=z,
+    mode='lines',
+    line=dict(color='rgba(70, 70, 70, 0.7)', width=4),
+    hoverinfo='skip',
+    showlegend=False
+))
+fig.add_trace(go.Scatter3d(
     x=x,
     y=y,
     z=z,
     mode='markers',
     marker=dict(
         size=5,
-        color=z,  # Color points by z-value
+        color=indices,
+        cmin=1,
+        cmax=max(len(indices), 1),
         colorscale='Viridis',
-        showscale=True
+        showscale=True,
+        colorbar=dict(title='Point index')
     ),
     text=indices,  # This is what shows on hover
-    hovertemplate='<b>Index: %{text}</b><br>X: %{x:.2f}<br>Y: %{y:.2f}<br>Z: %{z:.2f}<extra></extra>'
-)])
+    hovertemplate='<b>Index: %{text}</b><br>X: %{x:.2f}<br>Y: %{y:.2f}<br>Z: %{z:.2f}<extra></extra>',
+    showlegend=False
+))
 
 fig.update_layout(
     title='3D Scatter Plot with Index on Hover',
@@ -116,9 +131,14 @@ fig.update_layout(
 import pathlib
 
 
-figs_dir = pathlib.Path("myhtml")
+# figs_dir = pathlib.Path("myhtml")
+# figs_dir.mkdir(exist_ok=True)
+# fig.write_html(str(figs_dir / "pulse_compression_lpf_plot.html"))
+
+
+figs_dir = Path(__file__).parent / "figs"
 figs_dir.mkdir(exist_ok=True)
-fig.write_html(str(figs_dir / "pulse_compression_lpf_plot.html"))
+fig.write_html(str(figs_dir / "EXP008_path.html"))
 
 # fig.write_html()
 # fig.show()
