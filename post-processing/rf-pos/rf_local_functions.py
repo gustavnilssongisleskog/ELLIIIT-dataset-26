@@ -30,6 +30,7 @@ sys.modules["csi_plot_utils"] = csi
 spec.loader.exec_module(csi)
 
 
+### DATA REFORMATTING ##################################################
 def extract_phase(requests: dict[str, list[int]]) -> xr.Dataset:
     antenna_positions = csi.load_antenna_positions()
     cycles_by_experiment = requests
@@ -144,7 +145,7 @@ def _discover_requested_hostnames(
 
     return hostnames
 
-
+### POSITION ESTIMATION ##################################################
 def phase_to_distance(
     phase_rad: np.ndarray,
     frequency_hz: float,
@@ -204,6 +205,7 @@ def _multilateration_2d_single(
 
     try:
         position = np.linalg.solve(AtWA, AtWb)
+        print(position)
     except np.linalg.LinAlgError:
         position, *_ = np.linalg.lstsq(AtWA, AtWb, rcond=None)
         position = position[:2]
@@ -213,15 +215,19 @@ def _multilateration_2d_single(
 def _distance_candidates_from_phase_rad(
     phase_rad: np.ndarray,
     frequency_hz: float,
+    min_distance: float,
     max_distance: float,
 ) -> list[np.ndarray]:
     wavelength = float(const.speed_of_light) / float(frequency_hz)
     d_mod = phase_to_distance(phase_rad, frequency_hz)
     candidate_sets: list[np.ndarray] = []
     for d0 in d_mod:
+        min_k = int(np.ceil(max(0.0, (min_distance - d0) / wavelength)))
         max_k = int(np.floor((max_distance - d0) / wavelength))
-        candidate_sets.append(d0 + np.arange(max_k + 1, dtype=float) * wavelength)
-    print(candidate_sets)
+        if max_k < min_k:
+            candidate_sets.append(np.empty((0,), dtype=float))
+        else:
+            candidate_sets.append(d0 + np.arange(min_k, max_k + 1, dtype=float) * wavelength)
     return candidate_sets
 
 
@@ -279,6 +285,7 @@ def estimate_positions_2d_from_phase(
     phase_var: str = "csi_phase_rad",
     amplitude_var: str | None = None,
     height_offset: float | np.ndarray | None = None,
+    min_distance: float = 0.0,
     max_distance: float = 8.4,
     prior_position: np.ndarray | None = None,
     prior_weight: float | None = None,
@@ -303,7 +310,8 @@ def estimate_positions_2d_from_phase(
             antenna_xy,
             observation_phase,
             frequency_hz,
-            max_distance,
+            min_distance=min_distance,
+            max_distance=max_distance,
             height_offset=height_offset,
             weights=observation_weights,
             prior_position=prior_position,
@@ -331,22 +339,25 @@ def _candidate_positions_and_scores(
     antenna_xy: np.ndarray,
     phase_rad: np.ndarray,
     frequency_hz: float,
+    min_distance: float,
     max_distance: float,
     height_offset: float | np.ndarray | None = None,
     weights: np.ndarray | None = None,
     prior_position: np.ndarray | None = None,
     prior_weight: float | None = None,
 ) -> list[tuple[np.ndarray, float]]:
-    candidate_sets = _distance_candidates_from_phase_rad(phase_rad, frequency_hz, max_distance)
+    candidate_sets = _distance_candidates_from_phase_rad(phase_rad, frequency_hz, min_distance, max_distance)
     candidate_results: list[tuple[np.ndarray, float]] = []
+    #print(_choose_candidate_distances(antenna_xy, candidate_sets))
     for chosen_distances in _choose_candidate_distances(antenna_xy, candidate_sets):
+        chosen_distances_2d = chosen_distances
         if height_offset is not None:
-            chosen_distances = project_distances_to_plane(chosen_distances, height_offset)
+            chosen_distances_2d = project_distances_to_plane(chosen_distances, height_offset)
 
         try:
             position = _multilateration_2d_single(
                 antenna_xy,
-                chosen_distances,
+                chosen_distances_2d,
                 weights,
             )
         except ValueError:
@@ -355,7 +366,7 @@ def _candidate_positions_and_scores(
         score = _score_position(
             position,
             antenna_xy,
-            chosen_distances,
+            chosen_distances_2d,
             weights=weights,
             prior_position=prior_position,
             prior_weight=prior_weight,
@@ -364,7 +375,7 @@ def _candidate_positions_and_scores(
 
     return candidate_results
 
-
+### PLOTTING ##################################################
 def _make_likelihoods(scores: np.ndarray) -> np.ndarray:
     scores = np.asarray(scores, dtype=float)
     if scores.size == 0:
@@ -384,6 +395,7 @@ def plot_position_candidates(
     phase_var: str = "csi_phase_rad",
     amplitude_var: str | None = None,
     height_offset: float | np.ndarray | None = None,
+    min_distance: float = 0.0,
     max_distance: float = 8.4,
     prior_position: np.ndarray | None = None,
     prior_weight: float | None = None,
@@ -412,7 +424,8 @@ def plot_position_candidates(
         antenna_xy,
         phase_rad,
         frequency_hz,
-        max_distance,
+        min_distance=min_distance,
+        max_distance=max_distance,
         height_offset=height_offset,
         weights=weights,
         prior_position=prior_position,
