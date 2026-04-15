@@ -1,6 +1,8 @@
 from pathlib import Path
 import importlib.util
 import sys
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import samplerate
 import numpy as np
 import xarray as xr
@@ -493,16 +495,7 @@ def get_corr_with_LPF_curve(TX, selected_anchors_dict):
     return pulse_compr_all, LPF_all, corr_index_array
 
 
-def plot_pulsecomp_and_lpf(
-    pulse_compr_all,
-    LPF_all,
-    corr_index_array,
-    fs,
-    selected_anchors_dict,
-    TX,
-    true_distances=None,
-    plot_full_pulse_compression=True,
-):
+def plot_pulsecomp_and_lpf(pulse_compr_all, LPF_all, corr_index_array, fs, selected_anchors_dict, TX, true_distances=None, plot_full_pulse_compression=True):
     """
     Plot pulse compression values, LPF values, and vertical lines for chosen peaks, with x-axis in meters.
     """
@@ -609,6 +602,7 @@ def load_experiment_setup() -> dict:
     v_sound = 20 * np.sqrt(273 + config["temperature"])
     fs_mic = config['fs_mic']
     plot_full_pulse_compression = config['plot_full_pulse_compression']
+    mic_processing_workers = config.get('mic_processing_workers')
 
     if config['use_all_mics']:
         mic_labels = config['all_mics']
@@ -632,18 +626,57 @@ def load_experiment_setup() -> dict:
         'selected_mic_positions': selected_mic_positions,
         'chirp_orig_resampl': chirp_orig_resampl,
         'plot_full_pulse_compression': plot_full_pulse_compression,
+        'mic_processing_workers': mic_processing_workers,
     }
 
 
-def collect_anchor_candidates(selected_mic_positions: dict, experiment_id: str, cycle_id: int, dataset_path, chirp_orig_resampl: np.ndarray, fs_mic: float, n_selected_ans: int, sumrate_threshold: float) -> list:
-    """Loop over all selected microphones and collect anchor candidates."""
-    anchor_candidates = []
-    for mic_label in tqdm(selected_mic_positions, total=len(selected_mic_positions), desc="Processing microphones", unit="mic"):
-        _waveform, waveform_values, _sample_index = get_acoustic_waveform(experiment_id, cycle_id, mic_label, dataset_path)
-        waveform_filtered = butter_highpass_filter(waveform_values, 15000, fs_mic, 10)
-        anchor_info = select_anchors(waveform_filtered, mic_label, experiment_id, cycle_id, n_selected_ans, sumrate_threshold)
-        anchor_candidates.append(anchor_info)
-    return anchor_candidates
+def _process_single_microphone(task: tuple[str, str, int, str | Path | None, float, int, float]) -> dict[str, object]:
+    mic_label, experiment_id, cycle_id, dataset_path, fs_mic, n_selected_ans, sumrate_threshold = task
+    _waveform, waveform_values, _sample_index = get_acoustic_waveform(experiment_id, cycle_id, mic_label, dataset_path)
+    waveform_filtered = butter_highpass_filter(waveform_values, 15000, fs_mic, 10)
+    return select_anchors(waveform_filtered, mic_label, experiment_id, cycle_id, n_selected_ans, sumrate_threshold)
+
+
+def collect_anchor_candidates(selected_mic_positions: dict, experiment_id: str, cycle_id: int, dataset_path, chirp_orig_resampl: np.ndarray, fs_mic: float, n_selected_ans: int, sumrate_threshold: float, n_workers: int | None = None) -> list:
+    """Collect anchor candidates for all selected microphones, optionally using multiprocessing."""
+    mic_labels = list(selected_mic_positions)
+    if not mic_labels:
+        return []
+
+    if n_workers is None:
+        cpu_count = os.cpu_count() or 1
+        n_workers = min(len(mic_labels), max(1, cpu_count - 1))
+    else:
+        n_workers = max(1, int(n_workers))
+
+    tasks = [
+        (mic_label, experiment_id, int(cycle_id), dataset_path, fs_mic, n_selected_ans, sumrate_threshold)
+        for mic_label in mic_labels
+    ]
+
+    if n_workers <= 1 or len(mic_labels) == 1:
+        anchor_candidates = []
+        for task in tqdm(tasks, total=len(tasks), desc="Selecting anchor candidates", unit="mic"):
+            anchor_candidates.append(_process_single_microphone(task))
+        return anchor_candidates
+
+    try:
+        results_by_mic = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(_process_single_microphone, task): task[0]
+                for task in tasks
+            }
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"Processing microphones ({n_workers} proc)", unit="mic"):
+                mic_label = futures[future]
+                results_by_mic[mic_label] = future.result()
+        return [results_by_mic[mic_label] for mic_label in mic_labels]
+    except Exception as exc:
+        print(f"Multiprocessing failed ({exc}); falling back to sequential microphone processing.")
+        anchor_candidates = []
+        for task in tqdm(tasks, total=len(tasks), desc="Selecting anchor candidates", unit="mic"):
+            anchor_candidates.append(_process_single_microphone(task))
+        return anchor_candidates
 
 
 def apply_gain_equalisation(selected_anchors_dict: dict, chirp_orig_resampl: np.ndarray, wmin: int = 8000, wmax: int = 10000) -> dict:
@@ -680,10 +713,10 @@ def compute_ranging(corr_index_array: np.ndarray, chirp_orig_resampl: np.ndarray
 
 def print_ranging_errors(distances_meas: np.ndarray, true_distances: dict | None, selected_anchors_dict: dict) -> None:
     """Print measured distances and, if available, ranging errors against ground truth."""
-    print("Measured distances (m):", distances_meas)
+    #print("Measured distances (m):", distances_meas)
     if true_distances is None:
         return
-    print("Theoretical distances (m):")
+    #print("Theoretical distances (m):")
     ranging_errors = []
     for idx, mic_label in enumerate(selected_anchors_dict.keys()):
         meas_val = float(distances_meas[idx, 0])
@@ -1106,6 +1139,24 @@ def plot_position_error_cdfs(error_2d_m: np.ndarray, error_3d_m: np.ndarray, pat
     ax.grid(True, alpha=0.3)
     if x2.size or x3.size:
         ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_ranging_error_cdf(per_anchor_abs_error_m: np.ndarray, path_id: int | str) -> None:
+    """Plot one CDF curve for all absolute ranging errors combined for one PATH_ID."""
+    x_rng, y_rng = empirical_cdf(per_anchor_abs_error_m)
+    if x_rng.size == 0:
+        print(f"No ranging-error samples available for PATH_ID {path_id}.")
+        return
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(x_rng, y_rng, linewidth=2, label="Combined Ranging Error CDF")
+    ax.set_title(f"Combined Ranging Error CDF - PATH_ID {path_id}")
+    ax.set_xlabel("Absolute Ranging Error (m)")
+    ax.set_ylabel("Empirical CDF")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
     plt.tight_layout()
     plt.show()
 

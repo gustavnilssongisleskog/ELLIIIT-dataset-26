@@ -209,6 +209,24 @@ def open_netcdf_dataset(dataset_path: str | Path, *, label: str = "NetCDF datase
             "an HDF5 NetCDF backend for xarray. Install one into the same interpreter, for example "
             f"{install_hint}."
         ) from exc
+    except OSError as exc:
+        message = str(exc)
+        lower_message = message.lower()
+        is_corrupt = (
+            "netcdf: hdf error" in lower_message
+            or "truncated file" in lower_message
+            or "unable to synchronously open file" in lower_message
+        )
+        if not is_corrupt:
+            raise
+
+        raise RuntimeError(
+            f"Could not open {label} at {dataset_path}. The NetCDF/HDF5 file appears corrupted or incomplete "
+            "(often caused by interrupted download or partial cloud-sync state). "
+            "Please re-download or replace this dataset file, then try again. "
+            "If you use OneDrive, ensure the file is fully available offline before opening it. "
+            f"Original error: {message}"
+        ) from exc
 
 
 def load_antenna_positions(positions_url: str = POSITIONS_URL) -> dict[str, np.ndarray]:

@@ -62,6 +62,7 @@ if __name__ == "__main__":
 
 	# Plots for the selected PATH_ID
 	alf.plot_position_error_cdfs(pos_data['error_2d_m'], pos_data_3d['error_3d_m'], PATH_ID)
+	alf.plot_ranging_error_cdf(rng_data['per_anchor_abs_error_m'], PATH_ID)
 	alf.plot_estimated_vs_gt_2d(pos_data['estimated_xy'], pos_data['ground_truth_xy'], PATH_ID, room_size_xy=(8.56, 4.0))
 
 	# Plot one chosen 3D sample with used and not-used microphones

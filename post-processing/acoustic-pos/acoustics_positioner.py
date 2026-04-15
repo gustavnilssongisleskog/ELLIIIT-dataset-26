@@ -7,8 +7,8 @@ CSI_DATASET_PATH = None  # Optional: provide a specific CSI dataset path if need
 
 if __name__ == "__main__":
 
-    EXPERIMENT_ID = "EXP010"
-    CYCLE_ID = 70  # Set the exact acoustic cycle you want to inspect.
+    EXPERIMENT_ID = "EXP008"
+    CYCLE_ID = 5  # Set the exact acoustic cycle you want to inspect.
     PATH_ID = 0
 
     # Load all setup values (config, microphone positions, chirp)
@@ -18,6 +18,11 @@ if __name__ == "__main__":
     # print("Sample rate of the source : %.2f Hz" % setup['fs_source'])
     # print("Sample rate of the microphone : %.2f Hz" % setup['fs_mic'])
     print(f"Processing {len(setup['selected_mic_positions'])} microphones...")
+    workers_msg = setup.get('mic_processing_workers')
+    if workers_msg is None:
+        print("Microphone processing workers: auto")
+    else:
+        print(f"Microphone processing workers: {workers_msg}")
 
     # Read the GT position for that measurement
     position = alf.get_rover_position(EXPERIMENT_ID, CYCLE_ID, CSI_DATASET_PATH)
@@ -30,7 +35,7 @@ if __name__ == "__main__":
         print(f"No rover position available for cycle {CYCLE_ID}")
 
     # Collect anchor candidates from all selected microphones
-    anchor_candidates = alf.collect_anchor_candidates(setup['selected_mic_positions'], EXPERIMENT_ID, CYCLE_ID, DATASET_PATH, setup['chirp_orig_resampl'], setup['fs_mic'], setup['n_selected_ans'], setup['sumrate_threshold'])
+    anchor_candidates = alf.collect_anchor_candidates(setup['selected_mic_positions'], EXPERIMENT_ID, CYCLE_ID, DATASET_PATH, setup['chirp_orig_resampl'], setup['fs_mic'], setup['n_selected_ans'], setup['sumrate_threshold'], n_workers=setup.get('mic_processing_workers'))
 
     # Select the top anchors based on the chosen method
     selected_anchors_dict, sort_key = alf.select_top_anchors(anchor_candidates, setup['anchor_selection_method'], setup['n_selected_ans'])
