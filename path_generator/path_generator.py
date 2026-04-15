@@ -46,12 +46,16 @@ def generate_walks(ds: xr.Dataset, include: np.ndarray, num_walks: int, num_stop
     graph, node_to_measurement = generate_graph(ds, include=include)
     N = len(graph)
     out = []
+    experiment_ids: list = ds.coords["experiment_id"].data.tolist()
+    banned_experiments = list(map(experiment_ids.index, ["EXP005", "EXP012"]))
 
     for i in range(num_walks):
         print(i)
         walk = None
         while walk is None:
             sequence = rng.choice(N, num_stops_per_walk + 1, replace=False)
+            if node_to_measurement[sequence[0]][0] in banned_experiments:
+                continue
             walk = generate_walk(graph, [], sequence)
         walk_info = []
         for node, rest in walk:
@@ -65,6 +69,8 @@ def generate_walks(ds: xr.Dataset, include: np.ndarray, num_walks: int, num_stop
             #     # "position": point,
             #     "resting": rest
             # })
+            if exp in banned_experiments:
+                rest = False
             walk_info.append((exp, cycle, rest))
         out.append(walk_info)
 
