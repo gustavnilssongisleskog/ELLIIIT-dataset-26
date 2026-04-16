@@ -9,5 +9,6 @@
   "peak_prominence_factor": 0.24,
   "plot_full_pulse_compression": false,
   "temperature": 20,
-  "wake_up_duration": 0.06
+  "wake_up_duration": 0.06,
+  "bias_vector_xyz": [0.0421, -0.0028, -0.4414]
 }

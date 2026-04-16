@@ -386,22 +386,37 @@ def norm_correlate(TX, rx_matrix, n):
 
 
 def get_peak_prom_index(LPF_val, corr_val):
-    # find all peaks and calculate promineces
-    peaks, _ = find_peaks(LPF_val)
-    prominences = peak_prominences(LPF_val, peaks)[0]
-    most_prom = prominences[prominences > config["peak_prominence_factor"]][-1]
-    most_prom_idx = np.where(np.around(prominences, decimals=5) == np.around(most_prom,
-                                                                             decimals=5))  # Select first index from row which > PP Threshold [0][0]
-    idx_peak_samples = peaks[most_prom_idx]
+    """Extract peak prominence index with error handling. Returns NaN if data is invalid/missing."""
+    try:
+        # find all peaks and calculate promineces
+        peaks, _ = find_peaks(LPF_val)
+        
+        # Check if any peaks were found
+        if len(peaks) == 0:
+            print("Warning: No peaks found in LPF signal")
+            return np.nan
+        
+        prominences = peak_prominences(LPF_val, peaks)[0]
+        
+        # Check if any peaks exceed the prominence threshold
+        above_threshold = prominences[prominences > config["peak_prominence_factor"]]
+        if len(above_threshold) == 0:
+            print(f"Warning: No peaks exceed prominence threshold ({config['peak_prominence_factor']})")
+            return np.nan
+        
+        most_prom = above_threshold[-1]
+        most_prom_idx = np.where(np.around(prominences, decimals=5) == np.around(most_prom,
+                                                                                 decimals=5))[0][0]  # Select first index from row which > PP Threshold [0][0]
+        idx_peak_samples = peaks[most_prom_idx]
 
-    # print('PPF: ', most_prom)
-    # print('Sample index with selected peak: ', idx_peak_samples)
+        # calculate height of each peak's contour line
+        contour_heights = LPF_val[peaks] - prominences
 
-    # calculate height of each peak's contour line
-    contour_heights = LPF_val[peaks] - prominences
-
-    index_opt_general = idx_peak_determination_PP(corr_val, idx_peak_samples)
-    return index_opt_general
+        index_opt_general = idx_peak_determination_PP(corr_val, idx_peak_samples)
+        return index_opt_general
+    except Exception as e:
+        print(f"Warning: Error in peak prominence detection: {str(e)}")
+        return np.nan
 
 
 def idx_peak_determination_PP(corr_val, max_corr_index):
@@ -409,17 +424,26 @@ def idx_peak_determination_PP(corr_val, max_corr_index):
     Determines the peak index value after already selecting the most prominant peak
     :param corr_val: original correlation values
     :param max_corr_index: the selected index value for the peak from LPF curve
-    :return: index: index of peak value mapped after maximum of fitting curve value
+    :return: index: index of peak value mapped after maximum of fitting curve value, or NaN on error
     """
-    # Select all peaks to use later for mapping from max to most close peak
-    peaks_index, _ = find_peaks(x=corr_val)
+    try:
+        # Select all peaks to use later for mapping from max to most close peak
+        peaks_index, _ = find_peaks(x=corr_val)
+        
+        # Check if peaks exist
+        if len(peaks_index) == 0:
+            print("Warning: No peaks found in correlation signal")
+            return np.nan
 
-    # Find closed match with peak indexes
-    eucl_dist = np.abs(peaks_index - max_corr_index)
-    index = np.argmin(eucl_dist)
-    max_corr_index_mapped = peaks_index[index]
+        # Find closed match with peak indexes
+        eucl_dist = np.abs(peaks_index - max_corr_index)
+        index = np.argmin(eucl_dist)
+        max_corr_index_mapped = peaks_index[index]
 
-    return max_corr_index_mapped
+        return max_corr_index_mapped
+    except Exception as e:
+        print(f"Warning: Error in peak determination: {str(e)}")
+        return np.nan
 
 def LPF(x, typeF, order, cutoff, fs):
     """
@@ -478,17 +502,21 @@ def get_corr_with_LPF_curve(TX, selected_anchors_dict):
 
 
     for rx in tqdm(range(n_nodes)):
-        # Pulse compression
-        corr_val = norm_correlate(TX, rx_audio_amp, rx)
-        pulse_compr_all = np.vstack((pulse_compr_all, corr_val))
+        try:
+            # Pulse compression
+            corr_val = norm_correlate(TX, rx_audio_amp, rx)
+            pulse_compr_all = np.vstack((pulse_compr_all, corr_val))
 
-        # Add LPF to determine envelope
-        LPF_val = LPF(corr_val, 'lowpass', 10, config['fs_mic']/26, config['fs_mic'])  # 70, fs_mic/35   #1000, 5000, #1000, 10000
-        LPF_all = np.vstack((LPF_all, LPF_val))
+            # Add LPF to determine envelope
+            LPF_val = LPF(corr_val, 'lowpass', 10, config['fs_mic']/26, config['fs_mic'])  # 70, fs_mic/35   #1000, 5000, #1000, 10000
+            LPF_all = np.vstack((LPF_all, LPF_val))
 
-        # Get the peak prominence index
-        index_opt_general = get_peak_prom_index(LPF_val, corr_val)
-        corr_index_array = np.append(corr_index_array, index_opt_general)
+            # Get the peak prominence index
+            index_opt_general = get_peak_prom_index(LPF_val, corr_val)
+            corr_index_array = np.append(corr_index_array, index_opt_general)
+        except Exception as e:
+            print(f"Warning: Error processing microphone {rx}: {str(e)}. Appending NaN.")
+            corr_index_array = np.append(corr_index_array, np.nan)
 
     pulse_compr_all = np.delete(pulse_compr_all, 0, 0)
     LPF_all = np.delete(LPF_all, 0, 0)
@@ -702,7 +730,7 @@ def compute_true_distances(position: dict, selected_anchors_dict: dict, selected
 
 
 def compute_ranging(corr_index_array: np.ndarray, chirp_orig_resampl: np.ndarray, fs_mic: float, v_sound: float) -> np.ndarray:
-    """Convert correlation peak indices to measured distances (m)."""
+    """Convert correlation peak indices to measured distances (m). NaN indices produce NaN distances."""
     n_wake_up_samples = config["wake_up_duration"] * fs_mic
     n_wake_up_samples_eff = int(min(n_wake_up_samples, np.size(chirp_orig_resampl)))
     wake_up_at_sample = int(np.size(chirp_orig_resampl) - n_wake_up_samples_eff)
@@ -713,33 +741,53 @@ def compute_ranging(corr_index_array: np.ndarray, chirp_orig_resampl: np.ndarray
 
 
 def print_ranging_errors(distances_meas: np.ndarray, true_distances: dict | None, selected_anchors_dict: dict) -> None:
-    """Print measured distances and, if available, ranging errors against ground truth."""
+    """Print measured distances and, if available, ranging errors against ground truth. Skips NaN values."""
     #print("Measured distances (m):", distances_meas)
     if true_distances is None:
         return
     #print("Theoretical distances (m):")
     ranging_errors = []
+    n_valid = 0
+    n_invalid = 0
     for idx, mic_label in enumerate(selected_anchors_dict.keys()):
         meas_val = float(distances_meas[idx, 0])
+        
+        # Skip NaN distances
+        if np.isnan(meas_val):
+            print(f"  {mic_label}: INVALID (NaN)")
+            n_invalid += 1
+            continue
+        
         gt_val = float(true_distances[mic_label])
         error_val = meas_val - gt_val
         ranging_errors.append(abs(error_val))
+        n_valid += 1
         # print(f"  {mic_label}: measured={meas_val:.3f}, theoretical={gt_val:.3f}, error={error_val:+.3f}")
-    mean_ranging_error = float(np.mean(ranging_errors))
-    p95_ranging_error = float(np.percentile(ranging_errors, 95))
-    print(f"Mean absolute ranging error (m): {mean_ranging_error:.3f}")
-    print(f"P95 absolute ranging error (m): {p95_ranging_error:.3f}")
+    
+    if n_invalid > 0:
+        print(f"Skipped {n_invalid} invalid (NaN) distances")
+    
+    if len(ranging_errors) > 0:
+        mean_ranging_error = float(np.mean(ranging_errors))
+        p95_ranging_error = float(np.percentile(ranging_errors, 95))
+        print(f"Mean absolute ranging error (m) [valid anchors only]: {mean_ranging_error:.3f}")
+        print(f"P95 absolute ranging error (m) [valid anchors only]: {p95_ranging_error:.3f}")
+    else:
+        print("No valid ranging measurements available")
 
 
 
 def LS_positioning(anchor_positions, distances, x0, selected_mic_positions=None):
     """
-    Least Squares positioning estimate. Minimise the difference in measured distance to anchor point and estimated distances to do positioning
+    Least Squares positioning estimate. Minimise the difference in measured distance to anchor point and estimated distances to do positioning.
+    Automatically filters out NaN distances (invalid measurements).
+    Returns [NaN, NaN, NaN] if no valid distances available.
+    
     :param anchor_positions: e.g. np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0.5, 0.5, 0.5]])
-    :param distances: e.g. np.array([1.5, 1.3, 1.2, 1.4, 0.7])
+    :param distances: e.g. np.array([1.5, 1.3, 1.2, 1.4, 0.7]) - NaN values are filtered out
     :param x0: Initial guess for the position of the point e.g. np.array([0.5, 0.5, 0.5])
     :param selected_mic_positions: optional dict with microphone xyz positions keyed by label
-    :return: the estimated position
+    :return: the estimated position or [NaN, NaN, NaN] if insufficient valid data
     """
     if isinstance(anchor_positions, dict):
         first_value = next(iter(anchor_positions.values()), None)
@@ -769,14 +817,34 @@ def LS_positioning(anchor_positions, distances, x0, selected_mic_positions=None)
         raise ValueError(
             f"Mismatch between distances ({distances.size}) and anchors ({anchor_positions.shape[0]})"
         )
+    
+    # Filter out NaN distances
+    valid_mask = ~np.isnan(distances)
+    valid_distances = distances[valid_mask]
+    valid_anchor_positions = anchor_positions[valid_mask]
+    n_valid = np.sum(valid_mask)
+    n_invalid = len(distances) - n_valid
+    
+    if n_invalid > 0:
+        print(f"Filtering out {n_invalid} invalid (NaN) distance measurements")
+    
+    # Need at least 3 valid anchors for 3D positioning
+    if n_valid < 3:
+        print(f"Warning: Only {n_valid} valid anchors available. Need at least 3 for 3D positioning. Returning NaN.")
+        return np.array([np.nan, np.nan, np.nan])
 
     # Define the function to minimize
     def minimise_function_LS(x, anchor_positions, distances):
         # Calculate the squared differences between the estimated distances and the actual distances
         return np.sqrt(np.sum((np.linalg.norm(anchor_positions - x, axis=1) - distances) ** 2))
-    # Call the least squares optimizer
-    res = least_squares(minimise_function_LS, x0, args=(anchor_positions, distances))
-    return res.x
+    
+    try:
+        # Call the least squares optimizer
+        res = least_squares(minimise_function_LS, x0, args=(valid_anchor_positions, valid_distances))
+        return res.x
+    except Exception as e:
+        print(f"Warning: LS positioning failed: {str(e)}. Returning NaN.")
+        return np.array([np.nan, np.nan, np.nan])
 
 
 def append_dict_record(file_path: Path, record: dict) -> int:
@@ -829,7 +897,14 @@ def compute_position_error_metrics(position: dict, position_estimate: np.ndarray
 
 
 def print_position_error_report(metrics: dict) -> None:
-    """Print a compact position error report."""
+    """Print a compact position error report. Handles NaN estimates gracefully."""
+    est_pos = metrics['estimated_position_xyz']
+    
+    # Check if position estimate is invalid (all NaNs)
+    if np.all(np.isnan(est_pos)):
+        print("Position error report: Position estimate INVALID (insufficient valid distance measurements)")
+        return
+    
     if metrics["position_available"]:
         print(
             "Position error report:\n"

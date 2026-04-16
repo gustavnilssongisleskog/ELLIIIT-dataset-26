@@ -104,7 +104,12 @@ if __name__ == "__main__":
             np.array([4.0, 2.0, 1.5]),
             selected_mic_positions=setup['selected_mic_positions']
         )
-        print('\n ToA Estimated position: \n', position_estimate)
+        
+        # Format position output
+        if np.all(np.isnan(position_estimate)):
+            print('\nToA Estimated position: [NaN, NaN, NaN] (INVALID - insufficient data)')
+        else:
+            print(f'\nToA Estimated position: [{position_estimate[0]:.4f}, {position_estimate[1]:.4f}, {position_estimate[2]:.4f}]')
 
         # Compute and persist error records using helper functions
         position_metrics = alf.compute_position_error_metrics(position, position_estimate)
