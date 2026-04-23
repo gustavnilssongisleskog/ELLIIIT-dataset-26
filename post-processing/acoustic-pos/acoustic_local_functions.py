@@ -1581,3 +1581,219 @@ def compute_calibration_offset(output_dir: Path) -> dict:
     print(f"Calibration saved to: {calibration_file}")
     
     return calibration_result
+
+
+# ---------------------------------------------------------------------------
+# Evaluation helpers (used by read_acoustic_evaluation_data.py)
+# ---------------------------------------------------------------------------
+
+def path_sort_key(path_id):
+	"""Sort key that orders numeric path IDs before string ones."""
+	path_str = str(path_id)
+	if path_str.isdigit():
+		return (0, int(path_str))
+	return (1, path_str)
+
+
+def print_error_summary(label: str, errors_m: np.ndarray) -> None:
+	"""Print mean, RMSE and key percentiles for an error array."""
+	if errors_m.size == 0:
+		print(f"{label}: no samples")
+		return
+	mean_m = float(np.mean(errors_m))
+	rmse_m = float(np.sqrt(np.mean(np.square(errors_m))))
+	p0_m, p50_m, p90_m, p95_m = np.percentile(errors_m, [0, 50, 90, 95])
+	print(
+		f"{label}: "
+		f"mean={mean_m:.4f} m, "
+		f"RMSE={rmse_m:.4f} m, "
+		f"P0={p0_m:.4f} m, "
+		f"P50={p50_m:.4f} m, "
+		f"P90={p90_m:.4f} m, "
+		f"P95={p95_m:.4f} m"
+	)
+
+
+def print_mean_error_vector(label: str, estimated: np.ndarray, ground_truth: np.ndarray, axes: tuple) -> None:
+	"""Print the mean error vector (estimated - GT) component-wise."""
+	if estimated.size == 0 or ground_truth.size == 0:
+		print(f"{label} mean error vector: no samples")
+		return
+	valid_rows = np.isfinite(estimated).all(axis=1) & np.isfinite(ground_truth).all(axis=1)
+	if not np.any(valid_rows):
+		print(f"{label} mean error vector: no finite samples")
+		return
+	error_vectors = estimated[valid_rows] - ground_truth[valid_rows]
+	mean_vector = np.mean(error_vectors, axis=0)
+	mean_vector_norm = float(np.linalg.norm(mean_vector))
+	components = ", ".join(f"{ax}={val:.4f} m" for ax, val in zip(axes, mean_vector))
+	print(f"{label} mean error vector (est-gt): [{components}], |mean vector|={mean_vector_norm:.4f} m")
+
+
+def _annotate_cdf_stats(
+	ax,
+	errors_m: np.ndarray,
+	curve_color,
+	line_style: str,
+	label_prefix: str,
+	text_y: float,
+) -> None:
+	"""Draw vertical stat lines (mean/P50/P90/P95) with inline labels on a CDF axes."""
+	if errors_m.size == 0:
+		return
+	mean_m = float(np.mean(errors_m))
+	p50_m, p90_m, p95_m = np.percentile(errors_m, [50, 90, 95])
+	stats = [
+		("mean", float(mean_m)),
+		("P50", float(p50_m)),
+		("P90", float(p90_m)),
+		("P95", float(p95_m)),
+	]
+	for name, value in stats:
+		ax.axvline(value, color=curve_color, linestyle=line_style, linewidth=1.0, alpha=0.35)
+		if name == "mean":
+			left = mean_m < p50_m
+		elif name == "P50":
+			left = p50_m < mean_m
+		else:
+			left = False
+		x_text, ha = (value - 0.005, "right") if left else (value + 0.005, "left")
+		ax.text(
+			x_text, text_y,
+			f"{label_prefix} {name}={value:.3f} m",
+			color=curve_color, fontsize=8, rotation=90,
+			va="bottom", ha=ha, alpha=0.9,
+		)
+
+
+def plot_combined_cdfs(
+	error_2d_m: np.ndarray,
+	error_3d_m: np.ndarray,
+	ranging_abs_error_m: np.ndarray,
+	save_fn=None,
+) -> None:
+	"""Plot combined CDF curves for 2D, 3D and ranging errors.
+
+	Args:
+		save_fn: optional callable(fig, stem) to persist the figure; if None the
+		         figure is shown interactively.
+	"""
+	x2, y2 = empirical_cdf(error_2d_m)
+	x3, y3 = empirical_cdf(error_3d_m)
+	xr, yr = empirical_cdf(ranging_abs_error_m)
+
+	fig, ax = plt.subplots(figsize=(10, 6))
+	curve_specs = []
+	if x2.size:
+		(line2,) = ax.plot(x2, y2, linewidth=2, label="2D Position Error CDF (all paths)")
+		curve_specs.append((line2.get_color(), "-", "2D", error_2d_m, 0.7))
+	if x3.size:
+		(line3,) = ax.plot(x3, y3, linewidth=2, linestyle="--", label="3D Position Error CDF (all paths)")
+		curve_specs.append((line3.get_color(), "--", "3D", error_3d_m, 0.0))
+	if xr.size:
+		(liner,) = ax.plot(xr, yr, linewidth=2, linestyle=":", label="Ranging Error CDF (all paths)")
+		curve_specs.append((liner.get_color(), ":", "RNG", ranging_abs_error_m, 0.2))
+
+	for color, linestyle, label_prefix, errors, text_y in curve_specs:
+		_annotate_cdf_stats(ax, errors, color, linestyle, label_prefix, text_y)
+
+	ax.set_title("Combined CDFs Across All Paths")
+	ax.set_xlabel("Error (m)")
+	ax.set_ylabel("Empirical CDF")
+	ax.set_xlim(0, 1)
+	ax.grid(True, alpha=0.3)
+	if curve_specs:
+		ax.legend(fontsize=8)
+	plt.tight_layout()
+	if save_fn is not None:
+		save_fn(fig, "combined_cdfs")
+		plt.close(fig)
+	else:
+		plt.show()
+
+
+def plot_all_paths_in_one_2d(path_data_by_id: dict, room_size_xy: tuple = (8.56, 4.0), save_fn=None) -> None:
+	"""Overlay all path estimates and GT trajectories in a single 2-D room plot."""
+	import math as _math
+	fig, ax = plt.subplots(figsize=(8, 8))
+	room_x, room_y = room_size_xy
+	ax.plot([0, room_x, room_x, 0, 0], [0, 0, room_y, room_y, 0], "k-", linewidth=2.0, label="Room boundary")
+	cmap = plt.cm.get_cmap("tab20", max(1, len(path_data_by_id)))
+	for idx, path_id in enumerate(sorted(path_data_by_id.keys(), key=path_sort_key)):
+		pos_data = path_data_by_id[path_id]
+		est = pos_data["estimated_xy"]
+		gt = pos_data["ground_truth_xy"]
+		if est.size == 0:
+			continue
+		color = cmap(idx)
+		ax.plot(est[:, 0], est[:, 1], "o-", color=color, linewidth=1.4, markersize=3, label=f"Path {path_id} est")
+		valid_gt = ~np.isnan(gt).any(axis=1)
+		if np.any(valid_gt):
+			ax.plot(gt[valid_gt, 0], gt[valid_gt, 1], "--", color=color, linewidth=1.3, alpha=0.8, label=f"Path {path_id} gt")
+	ax.set_title("Estimated and GT 2D Trajectories - All Paths")
+	ax.set_xlabel("X (m)")
+	ax.set_ylabel("Y (m)")
+	ax.set_aspect("equal", adjustable="box")
+	ax.set_xlim(-0.2, room_x + 0.2)
+	ax.set_ylim(-0.2, room_y + 0.2)
+	ax.grid(True, alpha=0.3)
+	handles, labels = ax.get_legend_handles_labels()
+	if labels:
+		unique = dict(zip(labels, handles))
+		ax.legend(unique.values(), unique.keys(), loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
+	plt.tight_layout()
+	if save_fn is not None:
+		save_fn(fig, "all_paths_2d")
+		plt.close(fig)
+	else:
+		plt.show()
+
+
+def plot_path_subfigures(path_data_by_id: dict, room_size_xy: tuple = (8.56, 4.0), save_fn=None) -> None:
+	"""Plot each path in its own subplot, paginated into 3x4 grids."""
+	import math as _math
+	path_ids = sorted(path_data_by_id.keys(), key=path_sort_key)
+	n_paths = len(path_ids)
+	if n_paths == 0:
+		print("No path data available for subplot figure.")
+		return
+	n_cols, n_rows = 3, 4
+	paths_per_figure = n_cols * n_rows
+	n_figures = int(_math.ceil(n_paths / paths_per_figure))
+	room_x, room_y = room_size_xy
+	room_outline_x = [0.0, room_x, room_x, 0.0, 0.0]
+	room_outline_y = [0.0, 0.0, room_y, room_y, 0.0]
+	for fig_idx in range(n_figures):
+		page_ids = path_ids[fig_idx * paths_per_figure: (fig_idx + 1) * paths_per_figure]
+		fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows), squeeze=False)
+		for idx, path_id in enumerate(page_ids):
+			ax = axes[idx // n_cols][idx % n_cols]
+			pos_data = path_data_by_id[path_id]
+			est = pos_data["estimated_xy"]
+			gt = pos_data["ground_truth_xy"]
+			ax.plot(room_outline_x, room_outline_y, "k-", linewidth=1.6, label="Room")
+			if est.size:
+				ax.plot(est[:, 0], est[:, 1], "o-", linewidth=1.5, markersize=3, label="Estimated")
+			valid_gt = ~np.isnan(gt).any(axis=1)
+			if np.any(valid_gt):
+				ax.plot(gt[valid_gt, 0], gt[valid_gt, 1], "s--", linewidth=1.3, markersize=3, label="GT")
+			ax.set_title(f"Path {path_id}")
+			ax.set_xlabel("X (m)")
+			ax.set_ylabel("Y (m)")
+			ax.set_aspect("equal", adjustable="box")
+			ax.set_xlim(-0.2, room_x + 0.2)
+			ax.set_ylim(-0.2, room_y + 0.2)
+			ax.grid(True, alpha=0.3)
+			ax.legend(fontsize=8)
+		for idx in range(len(page_ids), n_rows * n_cols):
+			axes[idx // n_cols][idx % n_cols].axis("off")
+		fig.suptitle(
+			f"Estimated vs GT 2D Trajectories by Path (Figure {fig_idx + 1}/{n_figures})",
+			fontsize=14,
+		)
+		plt.tight_layout(rect=[0, 0, 1, 0.98])
+		if save_fn is not None:
+			save_fn(fig, f"path_subfigures_page_{fig_idx + 1:02d}")
+			plt.close(fig)
+		else:
+			plt.show()
