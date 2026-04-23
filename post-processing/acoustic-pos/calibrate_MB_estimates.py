@@ -106,7 +106,7 @@ def _apply_calibration(position_records: list[dict], bias: np.ndarray) -> list[d
             if np.isfinite(gt_arr).all() and np.isfinite(est_cal).all():
                 err_vec = est_cal - gt_arr
                 rec_cal["estimation_error_vector"] = err_vec.tolist()
-                rec_cal["position_error_m"] = float(np.linalg.norm(err_vec))
+                rec_cal["position_error_3d_m"] = float(np.linalg.norm(err_vec))
                 rec_cal["position_error_2d_m"] = float(np.linalg.norm(err_vec[:2]))
 
         calibrated.append(rec_cal)
