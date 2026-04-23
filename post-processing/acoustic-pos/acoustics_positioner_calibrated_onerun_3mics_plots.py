@@ -190,7 +190,6 @@ def _build_pulse_compression_plot(
                         y=lpf[peaks[above_mask]],
                         mode="markers",
                         name=f"Peaks>{prominence_threshold:.2f} {mic_label}",
-                        showlegend=False,
                         marker=dict(color=color, size=7, symbol="circle-open"),
                         hovertemplate=(
                             "Mic="
@@ -220,22 +219,12 @@ def _build_pulse_compression_plot(
             go.Scatter(
                 x=[x_signal[selected_idx]],
                 y=[lpf[selected_idx]],
-                mode="markers",
+                mode="markers+text",
                 name=f"Selected peak {mic_label}",
                 marker=dict(color="red", size=10, symbol="diamond"),
+                text=[f"{mic_label} prom={nearest_prom:.4f}"],
+                textposition="top center",
             )
-        )
-        label_y = min(1.28, float(lpf[selected_idx]) + 0.12)
-        fig.add_annotation(
-            x=float(x_signal[selected_idx]),
-            y=label_y,
-            text=f"{mic_label} prom={nearest_prom:.4f}",
-            showarrow=True,
-            arrowhead=2,
-            ax=0,
-            ay=-18,
-            font=dict(color="red"),
-            bgcolor="rgba(255,255,255,0.7)",
         )
         fig.add_vline(
             x=float(x_signal[selected_idx]),
@@ -303,26 +292,15 @@ def _build_single_mic_lpf_plot(
 
     if selected_idx is not None and 0 <= selected_idx < lpf.size:
         dist_meas = float(x_signal[selected_idx])
-        corr_val = float(lpf[selected_idx])
         fig.add_trace(
             go.Scatter(
                 x=[dist_meas], y=[lpf[selected_idx]],
-                mode="markers",
+                mode="markers+text",
                 name="Selected peak",
                 marker=dict(color="red", size=11, symbol="diamond"),
+                text=[f"Selected: {dist_meas:.3f} m"],
+                textposition="top center",
             )
-        )
-        label_y = min(1.30, corr_val + 0.12)
-        fig.add_annotation(
-            x=dist_meas,
-            y=label_y,
-            text=f"Selected: {dist_meas:.3f} m (corr={corr_val:.3f})",
-            showarrow=True,
-            arrowhead=2,
-            ax=0,
-            ay=-18,
-            font=dict(color="red"),
-            bgcolor="rgba(255,255,255,0.7)",
         )
         fig.add_vline(
             x=dist_meas, line_color="red", line_width=1.5, line_dash="dot",
